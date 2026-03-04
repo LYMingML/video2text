@@ -19,6 +19,12 @@ NOISE_PATTERNS = [
 ]
 
 
+TAG_PATTERNS = [
+    re.compile(r"<\|[^|>]+\|>", re.IGNORECASE),  # e.g. <|Speech|>
+    re.compile(r"<[^>]+>", re.IGNORECASE),        # e.g. <speech>
+]
+
+
 def _is_noise_text(text: str) -> bool:
     """判断是否为非字幕噪声文本（进度条/日志等）。"""
     stripped = text.strip()
@@ -37,7 +43,10 @@ def _is_noise_text(text: str) -> bool:
 
 def _normalize_plain_line(text: str) -> str:
     """纯文本行归一化：去噪、折叠空白。"""
-    line = re.sub(r"\s+", " ", text).strip()
+    line = text
+    for pattern in TAG_PATTERNS:
+        line = pattern.sub(" ", line)
+    line = re.sub(r"\s+", " ", line).strip()
     if _is_noise_text(line):
         return ""
     return line

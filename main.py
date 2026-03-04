@@ -12,10 +12,13 @@ NVIDIA GPU 加速 | 局域网访问 | systemd 自启动
 import os
 import re
 import sys
+import json
 import shutil
+import zipfile
 import logging
 import argparse
 import tempfile
+import time
 import threading
 from pathlib import Path
 from typing import Callable, Iterator
@@ -35,6 +38,7 @@ from utils.subtitle import (
     normalize_segments_timeline,
     collect_plain_text,
 )
+from utils.translate import translate_segments_to_chinese
 
 logging.basicConfig(
     level=logging.INFO,
@@ -146,6 +150,94 @@ def _parse_lang_code(choice: str) -> str:
     return choice.split("（")[0].split("(")[0].strip()
 
 
+def _is_funasr_multilingual_model(model_name: str) -> bool:
+    """判断 FunASR 模型是否具备较好的多语言能力。"""
+    normalized = model_name.split(" ")[0].strip().lower()
+    multilingual_markers = [
+        "sensevoice",
+        "zh-en",
+        "seaco",
+    ]
+    return any(marker in normalized for marker in multilingual_markers)
+
+
+def _looks_non_chinese_text(text: str) -> bool:
+    """基于字符分布的轻量规则，判断文本是否主要为非中文。"""
+    normalized = re.sub(r"\s+", "", text)
+    if not normalized:
+        return False
+
+    zh_chars = len(re.findall(r"[\u4e00-\u9fff]", normalized))
+    ja_chars = len(re.findall(r"[\u3040-\u30ff]", normalized))
+    ko_chars = len(re.findall(r"[\uac00-\ud7af]", normalized))
+    latin_chars = len(re.findall(r"[A-Za-z]", normalized))
+
+    total = len(normalized)
+    zh_ratio = zh_chars / total
+
+    # 明显日/韩/拉丁语系，且中文占比很低，视为非中文。
+    if zh_ratio < 0.25 and (ja_chars + ko_chars + latin_chars) >= 12:
+        return True
+    return False
+
+
+def _guess_source_lang(lang_code: str, plain_text: str) -> str:
+    """推断翻译源语言，供模型选择使用。"""
+    if lang_code != "auto":
+        return lang_code
+
+    if re.search(r"[\u3040-\u30ff]", plain_text):
+        return "ja"
+    if re.search(r"[\uac00-\ud7af]", plain_text):
+        return "ko"
+
+    lower_text = plain_text.lower()
+    es_markers = [" que ", " de ", " la ", " el ", " y ", " por ", " para "]
+    if any(token in lower_text for token in es_markers):
+        return "es"
+
+    # 自动场景默认按英语兜底。
+    return "en"
+
+
+def _pick_funasr_model_for_language(
+    backend: str,
+    lang_code: str,
+    selected_model: str,
+    log_cb: Callable[[str], None] | None,
+) -> str:
+    """
+    当用户选择 FunASR 时，根据语言自动选择更合适的 FunASR 模型。
+    多语言场景优先使用 SenseVoiceSmall，避免切换到其他后端。
+    """
+    if backend != "FunASR（Paraformer）":
+        return selected_model
+
+    model = selected_model
+    multilingual_best = "iic/SenseVoiceSmall"
+
+    # 非中文语言：自动切换到 FunASR 多语言强模型。
+    non_zh_langs = {"en", "ja", "ko", "es"}
+    if lang_code in non_zh_langs:
+        if model.split(" ")[0].strip() != multilingual_best:
+            if log_cb:
+                log_cb(
+                    f"[MODEL-AUTO] 检测到 {lang_code} 语言，FunASR 自动切换为 {multilingual_best}"
+                )
+            model = multilingual_best
+        return model
+
+    # 自动检测时优先多语言模型，减少跨语种误配导致的慢响应。
+    if lang_code == "auto" and not _is_funasr_multilingual_model(model):
+        if log_cb:
+            log_cb(
+                f"[MODEL-AUTO] 自动检测语言场景，FunASR 自动切换为 {multilingual_best}"
+            )
+        model = multilingual_best
+
+    return model
+
+
 # ---------------------------------------------------------------------------
 # 支持的视频/音频扩展名
 # ---------------------------------------------------------------------------
@@ -200,6 +292,288 @@ def _history_dropdown_update(current: str | None = None):
         value = choices[0] if choices else None
     return gr.update(choices=choices, value=value)
 
+
+def _strip_fractional_time(text: str) -> str:
+    """兜底去除时间字符串中的小数秒，如 00:03:12.345 -> 00:03:12。"""
+    text = re.sub(r"(\d{2}:\d{2}:\d{2})\.\d+", r"\1", text)
+    text = re.sub(r"(\d{1,2}:\d{2})\.\d+", r"\1", text)
+    return text
+
+
+def _meta_path(job_dir: Path) -> Path:
+    return job_dir / "task_meta.json"
+
+
+def _save_task_meta(job_dir: Path, meta: dict):
+    _meta_path(job_dir).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _load_task_meta(job_dir: Path) -> dict:
+    p = _meta_path(job_dir)
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _parse_srt_segments(srt_path: Path) -> list[tuple[float, float, str]]:
+    """从 SRT 文件读取字幕段。"""
+    if not srt_path.exists():
+        return []
+
+    text = srt_path.read_text(encoding="utf-8", errors="ignore")
+    blocks = re.split(r"\n\s*\n", text.strip())
+    segments: list[tuple[float, float, str]] = []
+
+    def _to_seconds(srt_ts: str) -> float:
+        hms, ms = srt_ts.split(",")
+        h, m, s = hms.split(":")
+        return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000
+
+    for block in blocks:
+        lines = [ln.strip() for ln in block.splitlines() if ln.strip()]
+        if len(lines) < 3:
+            continue
+        ts_line = lines[1]
+        if "-->" not in ts_line:
+            continue
+        start_srt, end_srt = [x.strip() for x in ts_line.split("-->", maxsplit=1)]
+        try:
+            start_s = _to_seconds(start_srt)
+            end_s = _to_seconds(end_srt)
+        except Exception:
+            continue
+        subtitle_text = "\n".join(lines[2:]).strip()
+        if subtitle_text:
+            segments.append((start_s, end_s, subtitle_text))
+
+    return segments
+
+
+def _build_download_bundle(job_dir: Path, file_prefix: str, kind: str) -> str:
+    """构建下载压缩包（包含原文+译文）。kind: srt/txt"""
+    orig = job_dir / f"{file_prefix}.orig.{kind}"
+    zh = job_dir / f"{file_prefix}.zh.{kind}"
+    fallback_orig = job_dir / f"{file_prefix}.{kind}"
+
+    files: list[Path] = []
+    if orig.exists():
+        files.append(orig)
+    elif fallback_orig.exists():
+        files.append(fallback_orig)
+
+    if zh.exists():
+        files.append(zh)
+
+    if not files:
+        raise FileNotFoundError(f"未找到可打包的 {kind} 文件")
+
+    bundle_path = job_dir / f"{file_prefix}.{kind}.bundle.zip"
+    with zipfile.ZipFile(bundle_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for f in files:
+            zf.write(f, arcname=f.name)
+    return str(bundle_path)
+
+
+def _resolve_current_job(current_job: str | None, history_video: str | None) -> Path | None:
+    if current_job:
+        p = WORKSPACE_DIR / current_job
+        if p.exists() and p.is_dir():
+            return p
+
+    if not history_video:
+        return None
+
+    p = Path(history_video)
+    if not p.is_absolute():
+        p = (Path(__file__).parent / p)
+    if p.exists() and p.is_file() and p.parent.exists():
+        return p.parent
+    return None
+
+
+def _resolve_file_prefix(job_dir: Path, current_prefix: str | None) -> str | None:
+    if current_prefix:
+        return current_prefix
+
+    meta = _load_task_meta(job_dir)
+    if meta.get("file_prefix"):
+        return str(meta["file_prefix"])
+
+    for candidate in sorted(job_dir.glob("*.orig.srt")):
+        return candidate.name[:-9]  # strip '.orig.srt'
+    for candidate in sorted(job_dir.glob("*.srt")):
+        return candidate.stem
+    return None
+
+
+def translate_current_job(
+    history_video: str,
+    current_job: str,
+    current_prefix: str,
+    current_log: str,
+):
+    """
+    手动翻译当前任务：读取原文字幕，生成中文字幕，再生成下载压缩包。
+    yield 顺序：(status_text, plain_text, log_text, srt_bundle, txt_bundle, current_job, current_prefix)
+    """
+    logs = current_log.splitlines() if current_log else []
+    latest_progress = ""
+
+    def push_log(message: str):
+        logs.append(message)
+        if len(logs) > 400:
+            del logs[:120]
+
+    def dump_log() -> str:
+        return "\n".join(logs)
+
+    def _format_hms(seconds: float) -> str:
+        seconds = max(0, int(seconds))
+        m, s = divmod(seconds, 60)
+        h, m = divmod(m, 60)
+        return f"{h:02d}:{m:02d}:{s:02d}"
+
+    job_dir = _resolve_current_job(current_job, history_video)
+    if not job_dir:
+        push_log("[ERROR] 未找到当前任务目录，请先完成一次转录")
+        yield (
+            "❌ 翻译失败：请先转录一个视频",
+            "",
+            dump_log(),
+            None,
+            None,
+            current_job,
+            current_prefix,
+        )
+        return
+
+    file_prefix = _resolve_file_prefix(job_dir, current_prefix)
+    if not file_prefix:
+        push_log("[ERROR] 未找到原文字幕文件")
+        yield (
+            "❌ 翻译失败：未找到原文字幕",
+            "",
+            dump_log(),
+            None,
+            None,
+            job_dir.name,
+            current_prefix,
+        )
+        return
+
+    orig_srt = job_dir / f"{file_prefix}.orig.srt"
+    if not orig_srt.exists():
+        fallback_srt = job_dir / f"{file_prefix}.srt"
+        orig_srt = fallback_srt if fallback_srt.exists() else orig_srt
+
+    segments = _parse_srt_segments(orig_srt)
+    if not segments:
+        push_log("[ERROR] 原文字幕为空或解析失败")
+        yield (
+            "❌ 翻译失败：原文字幕为空",
+            "",
+            dump_log(),
+            None,
+            None,
+            job_dir.name,
+            file_prefix,
+        )
+        return
+
+    meta = _load_task_meta(job_dir)
+    source_lang = str(meta.get("source_lang") or "auto")
+    push_log(f"[TRANS] 任务: workspace/{job_dir.name}，源语言: {source_lang}")
+    yield (
+        "⏳ 正在开始翻译...",
+        "",
+        dump_log(),
+        None,
+        None,
+        job_dir.name,
+        file_prefix,
+    )
+
+    translated: list[tuple[float, float, str]] = []
+    total = len(segments)
+    start_ts = time.time()
+
+    for idx, seg in enumerate(segments, start=1):
+        try:
+            part = translate_segments_to_chinese(
+                [seg],
+                source_lang=source_lang,
+                log_cb=push_log,
+            )
+        except Exception as exc:
+            push_log(f"[ERROR] 翻译失败: {exc}")
+            yield (
+                "❌ 翻译失败（详情见底部日志）",
+                collect_plain_text(translated),
+                dump_log(),
+                None,
+                None,
+                job_dir.name,
+                file_prefix,
+            )
+            return
+
+        translated.extend(part)
+        elapsed = max(0.001, time.time() - start_ts)
+        avg = elapsed / idx
+        eta = max(0.0, (total - idx) * avg)
+        pct = int(idx * 100 / max(total, 1))
+        latest_progress = _strip_fractional_time(
+            f"⏳ 翻译进度：{pct}%｜预计剩余 {_format_hms(eta)}"
+        )
+
+        yield (
+            latest_progress,
+            collect_plain_text(translated),
+            dump_log(),
+            None,
+            None,
+            job_dir.name,
+            file_prefix,
+        )
+
+    zh_segments = normalize_segments_timeline(translated)
+    zh_srt_path = save_srt(zh_segments, str(job_dir / f"{file_prefix}.zh.srt"), normalize=False)
+    zh_txt_path = save_plain(zh_segments, str(job_dir / f"{file_prefix}.zh.txt"), normalize=False)
+    push_log(f"[OUT] 中文 SRT: {Path(zh_srt_path).name}")
+    push_log(f"[OUT] 中文 TXT: {Path(zh_txt_path).name}")
+
+    srt_bundle = _build_download_bundle(job_dir, file_prefix, "srt")
+    txt_bundle = _build_download_bundle(job_dir, file_prefix, "txt")
+    push_log(f"[OUT] SRT 打包: {Path(srt_bundle).name}")
+    push_log(f"[OUT] TXT 打包: {Path(txt_bundle).name}")
+
+    yield (
+        f"✅ 翻译完成：workspace/{job_dir.name}/（可下载原文+译文打包）",
+        segments_to_plain(zh_segments, normalize=False),
+        dump_log(),
+        srt_bundle,
+        txt_bundle,
+        job_dir.name,
+        file_prefix,
+    )
+
+
+def prepare_download_bundle(history_video: str, current_job: str, current_prefix: str, kind: str):
+    """下载按钮点击后动态打包当前任务文件。"""
+    job_dir = _resolve_current_job(current_job, history_video)
+    if not job_dir:
+        return None
+    file_prefix = _resolve_file_prefix(job_dir, current_prefix)
+    if not file_prefix:
+        return None
+    try:
+        return _build_download_bundle(job_dir, file_prefix, kind)
+    except Exception:
+        return None
+
 # ---------------------------------------------------------------------------
 # 核心转录函数
 # ---------------------------------------------------------------------------
@@ -221,27 +595,46 @@ def _do_transcribe_stream(
     lang_code = _parse_lang_code(language)
 
     try:
+        def _format_eta(seconds: float) -> str:
+            seconds = max(0, int(seconds))
+            m, s = divmod(seconds, 60)
+            h, m = divmod(m, 60)
+            return f"{h:02d}:{m:02d}:{s:02d}"
+
         # 1. 提取音频到 job 目录
         if log_cb:
-            log_cb("[STEP] 提取音频...")
+            log_cb("[STEP] 正在使用 ffmpeg 提取 WAV 文件（16kHz/单声道）...")
+        yield "⏳ 正在使用 ffmpeg 提取 WAV 文件...", []
         extract_audio(video_path, audio_path)
+
+        if log_cb:
+            log_cb("[STEP] 正在使用 ffprobe 读取音频时长...")
+        yield "⏳ 正在读取音频时长（ffprobe）...", []
         duration = get_audio_duration(audio_path)
 
-        if backend == "FunASR（Paraformer）" and lang_code == "es":
-            if log_cb:
-                log_cb("[FALLBACK] FunASR 当前配置对西班牙语支持有限，自动切换 faster-whisper")
-            backend = "faster-whisper（多语言）"
+        funasr_model = _pick_funasr_model_for_language(backend, lang_code, funasr_model, log_cb)
 
         logger.info(f"音频时长: {duration:.1f}s，后端: {backend}，语言: {lang_code}")
         if log_cb:
             log_cb(f"[ASR] 手动后端: {backend}")
             log_cb(f"[AUDIO] 时长: {duration:.1f}s")
 
-        chunk_seconds = 60 if duration >= 180 else 30
+        chunk_seconds = 120
+        overlap_seconds = 10
         chunk_dir = job_dir / "chunks"
         if duration > chunk_seconds:
-            chunk_items = split_audio_chunks(audio_path, str(chunk_dir), chunk_seconds=chunk_seconds)
+            if log_cb:
+                log_cb(f"[STEP] 正在使用 ffmpeg 按 {chunk_seconds}s 分片音频（重叠 {overlap_seconds}s）...")
+            yield f"⏳ 正在分片音频（每段 {chunk_seconds}s，重叠 {overlap_seconds}s）...", []
+            chunk_items = split_audio_chunks(
+                audio_path,
+                str(chunk_dir),
+                chunk_seconds=chunk_seconds,
+                overlap_seconds=overlap_seconds,
+            )
         else:
+            if log_cb:
+                log_cb("[CHUNK] 音频较短，无需分片，直接转写整段")
             chunk_items = [(audio_path, 0.0, duration)]
 
         if not chunk_items:
@@ -251,12 +644,31 @@ def _do_transcribe_stream(
         all_segments: list[tuple[float, float, str]] = []
         if log_cb:
             log_cb(f"[CHUNK] 分片数: {total_chunks}，粒度: {chunk_seconds}s")
+        yield f"⏳ 音频准备完成，共 {total_chunks} 个分片，开始识别...", []
+
+        if backend == "FunASR（Paraformer）":
+            effective_model = funasr_model.split(" ")[0].strip()
+            effective_device = "cuda:0" if device == "CUDA" else "cpu"
+        else:
+            effective_model = whisper_model
+            effective_device = device.lower()
+
+        if log_cb:
+            log_cb(
+                f"[ASR] 实际配置: backend={backend} model={effective_model} device={effective_device} language={lang_code}"
+            )
+        yield (
+            f"⏳ 识别配置：后端={backend} | 模型={effective_model} | 设备={effective_device} | 语言={lang_code}",
+            [],
+        )
 
         if backend == "FunASR（Paraformer）":
             from backend.funasr_backend import transcribe
             device_str = "cuda:0" if device == "CUDA" else "cpu"
             if log_cb:
                 log_cb(f"[MODEL] FunASR: {funasr_model}")
+                log_cb("[STEP] 正在加载 FunASR 模型并预热...")
+            yield "⏳ 正在加载 FunASR 模型...", []
 
             for idx, (chunk_path, start_s, end_s) in enumerate(chunk_items, start=1):
                 if STOP_EVENT.is_set():
@@ -279,17 +691,40 @@ def _do_transcribe_stream(
                     device=device_str,
                     progress_cb=_progress_cb,
                 )
+
+                if total_chunks > 1 and idx > 1:
+                    cutoff = start_s + overlap_seconds
+                    deduped: list[tuple[float, float, str]] = []
+                    for s, e, t in segs:
+                        if e <= overlap_seconds:
+                            continue
+                        if s < overlap_seconds:
+                            s = overlap_seconds
+                        deduped.append((s, e, t))
+                    segs = deduped
+
                 if start_s > 0:
                     segs = [(s + start_s, e + start_s, t) for s, e, t in segs]
+                    # 再次防护：避免重叠区重复字幕
+                    if total_chunks > 1 and idx > 1:
+                        segs = [(max(s, cutoff), e, t) for s, e, t in segs if e > cutoff]
                 all_segments.extend(segs)
 
-                progress_text = f"⏳ 转写进度：{idx}/{total_chunks} 块（约 {min(end_s, duration):.0f}s / {duration:.0f}s）"
+                done_s = min(max(0.0, end_s), max(duration, 1e-6))
+                ratio = max(0.0, min(1.0, done_s / max(duration, 1e-6)))
+                pct = int(ratio * 100)
+                eta_s = (duration - done_s) if done_s > 0 else duration
+                progress_text = _strip_fractional_time(
+                    f"⏳ 转写进度：{pct}%｜预计剩余 {_format_eta(eta_s)}"
+                )
                 yield progress_text, all_segments.copy()
 
         else:  # faster-whisper
             from backend.whisper_backend import transcribe
             if log_cb:
                 log_cb(f"[MODEL] Whisper: {whisper_model}")
+                log_cb("[STEP] 正在加载 faster-whisper 模型并预热...")
+            yield "⏳ 正在加载 faster-whisper 模型...", []
 
             for idx, (chunk_path, start_s, end_s) in enumerate(chunk_items, start=1):
                 if STOP_EVENT.is_set():
@@ -313,18 +748,41 @@ def _do_transcribe_stream(
                     compute_type="int8",   # Tesla P4 (sm_61) 只支持 int8
                     progress_cb=_progress_cb,
                 )
+
+                if total_chunks > 1 and idx > 1:
+                    cutoff = start_s + overlap_seconds
+                    deduped: list[tuple[float, float, str]] = []
+                    for s, e, t in segs:
+                        if e <= overlap_seconds:
+                            continue
+                        if s < overlap_seconds:
+                            s = overlap_seconds
+                        deduped.append((s, e, t))
+                    segs = deduped
+
                 if start_s > 0:
                     segs = [(s + start_s, e + start_s, t) for s, e, t in segs]
+                    if total_chunks > 1 and idx > 1:
+                        segs = [(max(s, cutoff), e, t) for s, e, t in segs if e > cutoff]
                 all_segments.extend(segs)
 
-                progress_text = f"⏳ 转写进度：{idx}/{total_chunks} 块（约 {min(end_s, duration):.0f}s / {duration:.0f}s）"
+                done_s = min(max(0.0, end_s), max(duration, 1e-6))
+                ratio = max(0.0, min(1.0, done_s / max(duration, 1e-6)))
+                pct = int(ratio * 100)
+                eta_s = (duration - done_s) if done_s > 0 else duration
+                progress_text = _strip_fractional_time(
+                    f"⏳ 转写进度：{pct}%｜预计剩余 {_format_eta(eta_s)}"
+                )
                 yield progress_text, all_segments.copy()
 
         if log_cb:
-            log_cb("[STEP] 生成字幕文件...")
+            log_cb("[STEP] 分片转写完成，准备汇总字幕片段...")
+        yield "⏳ 正在汇总识别结果...", all_segments.copy()
 
         if chunk_dir.exists():
             shutil.rmtree(chunk_dir, ignore_errors=True)
+            if log_cb:
+                log_cb("[CLEANUP] 已清理临时分片目录")
 
         return all_segments
 
@@ -348,7 +806,7 @@ def process(
 ):
     """
     Gradio 主处理函数。
-    yield 顺序：(status_text, plain_text, srt_file_path, txt_file_path, history_markdown, history_dropdown, log_text)
+    yield 顺序：(status_text, plain_text, history_markdown, history_dropdown, log_text, current_job, current_prefix, srt_bundle, txt_bundle)
     """
     logs: list[str] = []
 
@@ -370,9 +828,11 @@ def process(
             "",
             None,
             None,
-            _workspace_history_markdown(),
-            _history_dropdown_update(history_video),
             dump_log(),
+            "",
+            "",
+            None,
+            None,
         )
         return
 
@@ -383,14 +843,17 @@ def process(
             "",
             None,
             None,
-            _workspace_history_markdown(),
-            _history_dropdown_update(history_video),
             dump_log(),
+            "",
+            "",
+            None,
+            None,
         )
         return
 
     try:
         push_log("[STEP] 初始化...")
+        lang_code = _parse_lang_code(language)
 
         # 创建 job 目录，复制原始文件进去
         job_dir = _make_job_dir(video_path)
@@ -409,11 +872,13 @@ def process(
         yield (
             f"⏳ 处理中... 输出目录: workspace/{job_dir.name}",
             "",
-            None,
-            None,
             _workspace_history_markdown(),
             _history_dropdown_update(history_video),
             dump_log(),
+            job_dir.name,
+            file_prefix,
+            None,
+            None,
         )
 
         push_log(f"[ASR] 后端={backend} 语言={language} 设备={device}")
@@ -426,11 +891,13 @@ def process(
             yield (
                 progress_status,
                 collect_plain_text(segments),
-                None,
-                None,
                 _workspace_history_markdown(),
                 _history_dropdown_update(history_video),
                 dump_log(),
+                job_dir.name,
+                file_prefix,
+                None,
+                None,
             )
 
         push_log(f"[ASR] 原始片段数: {len(segments)}")
@@ -440,15 +907,18 @@ def process(
             yield (
                 "🛑 已停止（未生成字幕文件）",
                 collect_plain_text(segments),
-                None,
-                None,
                 _workspace_history_markdown(),
                 _history_dropdown_update(history_video),
                 dump_log(),
+                job_dir.name,
+                file_prefix,
+                None,
+                None,
             )
             return
 
         raw_plain_text = collect_plain_text(segments)
+        push_log("[STEP] 正在归一化字幕时间轴...")
         cleaned_segments = normalize_segments_timeline(segments)
         push_log(f"[ASR] 清洗后片段数: {len(cleaned_segments)}")
 
@@ -457,31 +927,65 @@ def process(
             yield (
                 "⚠️ 未识别到有效字幕（详情见底部日志）",
                 "",
-                None,
-                None,
                 _workspace_history_markdown(),
                 _history_dropdown_update(history_video),
                 dump_log(),
+                job_dir.name,
+                file_prefix,
+                None,
+                None,
             )
             return
 
-        # 保存到 job 目录
-        display_plain_text = raw_plain_text or segments_to_plain(cleaned_segments, normalize=False)
-        srt_path = save_srt(cleaned_segments, str(job_dir / f"{file_prefix}.srt"), normalize=False)
-        txt_path = save_plain(cleaned_segments, str(job_dir / f"{file_prefix}.txt"), normalize=False)
-        push_log(f"[OUT] SRT: {Path(srt_path).name}")
-        push_log(f"[OUT] TXT: {Path(txt_path).name}")
+        # 仅生成原文；翻译改为手动点击“翻译”按钮触发。
+        plain_text = raw_plain_text or segments_to_plain(cleaned_segments, normalize=False)
+        is_non_zh = lang_code in {"en", "ja", "ko", "es"} or _looks_non_chinese_text(plain_text)
 
-        status = f"✅ 完成！共 {len(segments)} 条字幕 → workspace/{job_dir.name}/"
+        source_lang = _guess_source_lang(lang_code, plain_text) if is_non_zh else "zh"
+        _save_task_meta(
+            job_dir,
+            {
+                "file_prefix": file_prefix,
+                "lang_code": lang_code,
+                "source_lang": source_lang,
+                "is_non_zh": is_non_zh,
+            },
+        )
+
+        push_log("[STEP] 正在写出原文 SRT/TXT 文件...")
+        orig_srt_path = save_srt(
+            cleaned_segments,
+            str(job_dir / f"{file_prefix}.orig.srt"),
+            normalize=False,
+        )
+        orig_txt_path = save_plain(
+            cleaned_segments,
+            str(job_dir / f"{file_prefix}.orig.txt"),
+            normalize=False,
+        )
+        push_log(f"[OUT] 原文 SRT: {Path(orig_srt_path).name}")
+        push_log(f"[OUT] 原文 TXT: {Path(orig_txt_path).name}")
+
+        # 保留兼容旧文件名
+        save_srt(cleaned_segments, str(job_dir / f"{file_prefix}.srt"), normalize=False)
+        save_plain(cleaned_segments, str(job_dir / f"{file_prefix}.txt"), normalize=False)
+
+        display_plain_text = plain_text
+        status = (
+            f"✅ 原文识别完成 → workspace/{job_dir.name}/ "
+            "（点击“翻译”按钮生成中文字幕与中文文本）"
+        )
         push_log("[DONE] 任务完成")
         yield (
             status,
             display_plain_text,
-            srt_path,
-            txt_path,
             _workspace_history_markdown(),
             _history_dropdown_update(video_path if video_path.startswith("workspace/") else None),
             dump_log(),
+            job_dir.name,
+            file_prefix,
+            None,
+            None,
         )
 
     except Exception as e:
@@ -490,11 +994,13 @@ def process(
         yield (
             "❌ 处理失败（详情见底部日志）",
             "",
-            None,
-            None,
             _workspace_history_markdown(),
             _history_dropdown_update(history_video),
             dump_log(),
+            "",
+            "",
+            None,
+            None,
         )
 
 
@@ -602,11 +1108,16 @@ def build_ui() -> gr.Blocks:
                         value="CUDA",
                     )
 
-                submit_btn = gr.Button("🚀 开始转录", variant="primary", size="lg")
-                stop_btn = gr.Button("⏹️ 停止转录", variant="secondary")
-
             # ── 右侧：输出区 ──────────────────────────────────────────────
             with gr.Column(scale=2):
+                with gr.Row():
+                    submit_btn = gr.Button("🚀 开始转录", variant="primary", size="lg")
+                    translate_btn = gr.Button("🌐 翻译", variant="secondary")
+                    stop_btn = gr.Button("⏹️ 停止转录", variant="secondary")
+                with gr.Row():
+                    srt_download = gr.DownloadButton("下载SRT字幕", value=None)
+                    txt_download = gr.DownloadButton("下载纯文本", value=None)
+
                 status_text = gr.Textbox(
                     label="状态",
                     value="等待上传文件...",
@@ -620,9 +1131,8 @@ def build_ui() -> gr.Blocks:
                     max_lines=40,
                     elem_classes=["output-text"],
                 )
-                with gr.Row():
-                    srt_download = gr.File(label="下载 SRT 字幕", interactive=False)
-                    txt_download = gr.File(label="下载纯文本", interactive=False)
+                current_job_state = gr.State(value="")
+                current_prefix_state = gr.State(value="")
 
         with gr.Row():
             log_output = gr.Textbox(
@@ -645,7 +1155,43 @@ def build_ui() -> gr.Blocks:
                 funasr_model_select,
                 device_select,
             ],
-            outputs=[status_text, plain_output, srt_download, txt_download, history_md, history_video_select, log_output],
+            outputs=[
+                status_text,
+                plain_output,
+                history_md,
+                history_video_select,
+                log_output,
+                current_job_state,
+                current_prefix_state,
+                srt_download,
+                txt_download,
+            ],
+        )
+
+        translate_btn.click(
+            fn=translate_current_job,
+            inputs=[history_video_select, current_job_state, current_prefix_state, log_output],
+            outputs=[
+                status_text,
+                plain_output,
+                log_output,
+                srt_download,
+                txt_download,
+                current_job_state,
+                current_prefix_state,
+            ],
+        )
+
+        srt_download.click(
+            fn=lambda hv, cj, cp: prepare_download_bundle(hv, cj, cp, "srt"),
+            inputs=[history_video_select, current_job_state, current_prefix_state],
+            outputs=[srt_download],
+        )
+
+        txt_download.click(
+            fn=lambda hv, cj, cp: prepare_download_bundle(hv, cj, cp, "txt"),
+            inputs=[history_video_select, current_job_state, current_prefix_state],
+            outputs=[txt_download],
         )
 
         def request_stop(current_log: str):
@@ -691,7 +1237,7 @@ def build_ui() -> gr.Blocks:
 
 def main():
     parser = argparse.ArgumentParser(description="视频转字幕 WebUI")
-    parser.add_argument("--port", type=int, default=7880, help="监听端口 (默认: 7880)")
+    parser.add_argument("--port", type=int, default=7881, help="监听端口 (默认: 7881)")
     parser.add_argument("--host", default="0.0.0.0", help="监听地址 (默认: 0.0.0.0 局域网可访问)")
     parser.add_argument("--share", action="store_true", help="生成 Gradio 公共链接")
     parser.add_argument("--ssl-certfile", default=None, help="HTTPS 证书路径（PEM）")

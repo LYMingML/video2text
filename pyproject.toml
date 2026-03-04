@@ -13,6 +13,7 @@ dependencies = [
     # FunASR 后端
     "funasr>=1.1.0",
     "modelscope>=1.9.0",
+    "addict>=2.4.0",
     # 音视频处理
     "ffmpeg-python>=0.2.0",
 ]

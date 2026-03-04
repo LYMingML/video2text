@@ -1,63 +1,85 @@
 # video2text
 
-本项目是一个在 Linux 服务器运行的本地 WebUI，用于将视频/音频转为字幕与纯文本，支持 GPU 加速、历史任务管理、停止转录、HTTPS 访问。
+本项目是一个 Linux 本地 WebUI，用于将视频/音频转为字幕与纯文本，支持 GPU 加速、历史任务管理、HTTPS、手动翻译与打包下载。
 
 ## 主要功能
 
-- 视频/音频上传与历史文件复用
-- 双后端：FunASR / faster-whisper（手动切换）
-- 分片流式转录进度显示（长音频可见实时进度）
-- 一键停止当前转录任务
-- 输出 SRT 与纯文本，时间轴自动清洗
-- 历史文件夹空间统计与删除
-- 支持 HTTP/HTTPS 启动（`main.sh`）
+- 上传新文件或复用历史文件
+- 双 ASR 后端：`FunASR` / `faster-whisper`
+- 分片流式进度（提取音频、分片、识别、汇总）
+- 转写/翻译进度统一为：`百分比 + 预计剩余 HH:MM:SS`
+- 音频分片策略：每片 120 秒，相邻分片 10 秒重叠覆盖
+- 一键停止当前转录
+- 转录阶段仅生成原文字幕与原文纯文本
+- 手动点击 `翻译` 按钮后生成中文译文字幕与中文译文纯文本
+- `下载SRT字幕`、`下载纯文本` 按钮点击后自动下载 zip（含原文+译文）
 
 ## 环境要求
 
 - Linux（推荐 Ubuntu）
 - Python 3.12
-- ffmpeg / ffprobe
+- `ffmpeg` / `ffprobe`
 - NVIDIA GPU（可选）
+- Ollama（用于本地翻译，默认 `qwen3.5:4b`）
 
-> Tesla P4 建议：`faster-whisper` 使用 `int8`。
+> ffmpeg 音频提取默认优先尝试 NVIDIA 硬件加速（CUDA/NVDEC），失败自动回退 CPU。
 
 ## 快速安装
 
 ```bash
 cd /home/lym/projects/video2text
 
-# 1) 创建虚拟环境
 python3 -m venv .venv
 source .venv/bin/activate
 
-# 2) 安装依赖
 pip install -U pip
 pip install -e .
 
-# 3) 安装 PyTorch（Tesla P4 / sm_61 推荐）
+# Tesla P4 / sm_61 推荐
 pip install "torch==2.3.1+cu121" "torchaudio==2.3.1+cu121" --index-url https://download.pytorch.org/whl/cu121
 ```
 
-## 启动与重启
+## Ollama 翻译模型
 
-项目已封装启动脚本：`main.sh`
+项目默认使用：`qwen3.5:4b`
+
+```bash
+ollama pull qwen3.5:4b
+```
+
+若拉取报“需要更新 Ollama”，先升级 Ollama 再拉取。
+
+## 启动
 
 ```bash
 cd /home/lym/projects/video2text
 chmod +x main.sh
 
-./main.sh auto    # 自动：有证书走 HTTPS，无证书走 HTTP
-./main.sh http    # 强制 HTTP
-./main.sh https   # 强制 HTTPS（需证书）
+./main.sh auto
+./main.sh http
+./main.sh https
 ```
 
-默认端口：`7880`
+默认端口：`7881`
 
-## HTTPS 证书生成（Linux 侧）
+## 使用流程（当前实现）
 
-项目支持两种方式：
+1. 点击 `开始转录`
+2. 系统生成原文文件：`*.orig.srt`、`*.orig.txt`（并保留兼容 `*.srt`、`*.txt`）
+3. 点击 `翻译`
+4. 系统生成译文文件：`*.zh.srt`、`*.zh.txt`
+5. 点击 `下载SRT字幕` 或 `下载纯文本`
+6. 自动下载 zip，内含原文+译文对应文件
 
-### 方式 A：mkcert（推荐）
+## 进度说明
+
+- 转写状态：`转写进度：xx%｜预计剩余 HH:MM:SS`
+- 翻译状态：`翻译进度：xx%｜预计剩余 HH:MM:SS`
+- 剩余时间只显示时分秒，不显示毫秒
+
+## HTTPS 证书（简版）
+
+推荐 `mkcert`：
 
 ```bash
 sudo apt update
@@ -69,110 +91,34 @@ mkcert -cert-file video2text.pem -key-file video2text-key.pem 192.168.1.2 localh
 ./main.sh https
 ```
 
-### 方式 B：openssl（临时自签）
+访问：`https://192.168.1.2:7881`
+
+## systemd
 
 ```bash
-cd /home/lym/projects/video2text
-openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
-	-keyout video2text-key.pem \
-	-out video2text.pem \
-	-subj "/CN=192.168.1.2" \
-	-addext "subjectAltName=IP:192.168.1.2,IP:127.0.0.1,DNS:localhost"
-
-./main.sh https
+sudo cp /home/lym/projects/video2text/video2text.service /etc/systemd/system/video2text.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now video2text
 ```
 
-## Win11 证书安装（HTTPS 信任）
+查看状态与日志：
 
-本文档已内置 Win11 客户端证书信任步骤，用于访问 Linux 端 `video2text` 的 HTTPS 页面。
-
-### 1) 先确认你的证书类型
-
-- 场景 A（推荐）：Linux 使用 `mkcert` 生成服务证书
-	- Win11 需导入 `mkcert` 的根证书 `rootCA.pem`
-- 场景 B：Linux 使用 `openssl` 自签 `video2text.pem`
-	- Win11 需导入 `video2text.pem` 到根证书仓库
-
-### 2) 从 Linux 拷贝证书到 Win11
-
-只复制公钥证书，不复制私钥：
-
-- 可复制：`video2text.pem`、`rootCA.pem`
-- 禁止复制：`video2text-key.pem`、`rootCA-key.pem`
-
-建议放在：`C:\Users\<你的用户名>\Downloads\`
-
-### 3) 在 Win11 导入证书（管理员 PowerShell）
-
-导入 mkcert 根证书（场景 A）：
-
-```powershell
-$rootCert = "C:\Users\<你的用户名>\Downloads\rootCA.pem"
-Import-Certificate -FilePath $rootCert -CertStoreLocation Cert:\LocalMachine\Root
+```bash
+systemctl status video2text --no-pager -l
+journalctl -u video2text -f
 ```
-
-导入 openssl 自签证书（场景 B）：
-
-```powershell
-$serverCert = "C:\Users\<你的用户名>\Downloads\video2text.pem"
-Import-Certificate -FilePath $serverCert -CertStoreLocation Cert:\LocalMachine\Root
-```
-
-### 4) 验证导入成功
-
-```powershell
-Get-ChildItem Cert:\LocalMachine\Root |
-	Where-Object { $_.Subject -like "*192.168.1.2*" -or $_.Subject -like "*mkcert*" } |
-	Select-Object Subject, Thumbprint, NotAfter
-```
-
-若你使用域名访问，请改为匹配域名关键字。
-
-### 5) 刷新浏览器并访问
-
-1. 关闭浏览器并重开
-2. 访问：`https://192.168.1.2:7880`
-3. 若仍提示不安全：
-	 - `Win + R` → `inetcpl.cpl`
-	 - 内容 → 清除 SSL 状态
-
-### 6) 常见问题
-
-- 已导入但仍不安全：通常是访问地址不在证书 SAN，或导入仓库错误
-- mkcert 为何导入 `rootCA.pem`：服务证书由根证书签发，需先信任签发者
-- 为何不能复制 `*-key.pem`：私钥泄露会导致证书可被伪造
-
-## 模型建议（简版）
-
-- 中文优先：`paraformer-zh`
-- 日语/韩语/粤语：优先尝试 `iic/SenseVoiceSmall`
-- 西班牙语：建议 `faster-whisper`（项目内已做自动回退）
-- 多语言高质量：`faster-whisper large-v3`（更慢）
 
 ## 常见命令
 
 ```bash
 # 语法检查
-.venv/bin/python -m py_compile main.py backend/funasr_backend.py backend/whisper_backend.py utils/audio.py utils/subtitle.py
+.venv/bin/python -m py_compile main.py backend/funasr_backend.py backend/whisper_backend.py utils/audio.py utils/subtitle.py utils/translate.py
 
 # 查看监听端口
-ss -tlnp | grep 7880
+ss -tlnp | grep 7881
 
-# 停止服务
-pkill -f "main.py"
-```
-
-## 仓库结构
-
-```text
-video2text/
-├── main.py
-├── main.sh
-├── backend/
-├── utils/
-├── workspace/
-├── design.md
-└── video2text.service
+# 重启服务
+sudo systemctl restart video2text
 ```
 
 ## 详细设计

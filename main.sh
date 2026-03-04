@@ -5,7 +5,7 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR"
 
 HOST="${HOST:-0.0.0.0}"
-PORT="${PORT:-7880}"
+PORT="${PORT:-7881}"
 PYTHON_BIN="${PYTHON_BIN:-.venv/bin/python}"
 CERT_FILE="${CERT_FILE:-video2text.pem}"
 KEY_FILE="${KEY_FILE:-video2text-key.pem}"
@@ -18,16 +18,94 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
 fi
 
 echo "[STEP] 停止旧进程..."
-pkill -f "main.py" 2>/dev/null || true
+
+kill_pid_gracefully() {
+  local pid="$1"
+  if [[ -z "$pid" ]]; then
+    return 0
+  fi
+  if ! kill -0 "$pid" 2>/dev/null; then
+    return 0
+  fi
+
+  echo "[KILL] 发送 TERM 到 PID=$pid"
+  kill "$pid" 2>/dev/null || true
+
+  for _ in {1..20}; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.2
+  done
+
+  echo "[KILL] PID=$pid 未在超时内退出，发送 KILL"
+  kill -9 "$pid" 2>/dev/null || true
+}
+
+collect_port_pids() {
+  local port="$1"
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnp 2>/dev/null \
+      | awk -v p=":$port" '$4 ~ p {print $NF}' \
+      | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' \
+      | sort -u
+    return 0
+  fi
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null | sort -u
+    return 0
+  fi
+  return 0
+}
+
+cleanup_old_processes() {
+  local port="$1"
+  local killed_any=0
+
+  # 1) 先清理占用端口的进程（最精准）
+  mapfile -t port_pids < <(collect_port_pids "$port")
+  if [[ ${#port_pids[@]} -gt 0 ]]; then
+    echo "[KILL] 检测到端口 $port 被占用，PID: ${port_pids[*]}"
+    for pid in "${port_pids[@]}"; do
+      kill_pid_gracefully "$pid"
+      killed_any=1
+    done
+  fi
+
+  # 2) 再按命令行兜底清理当前项目的 main.py 进程
+  mapfile -t main_pids < <(pgrep -f "${PROJECT_DIR}/main.py|main.py --host|main.py --port" 2>/dev/null || true)
+  if [[ ${#main_pids[@]} -gt 0 ]]; then
+    echo "[KILL] 兜底清理 main.py 进程，PID: ${main_pids[*]}"
+    for pid in "${main_pids[@]}"; do
+      kill_pid_gracefully "$pid"
+      killed_any=1
+    done
+  fi
+
+  # 3) 最终确认端口释放
+  mapfile -t remain_pids < <(collect_port_pids "$port")
+  if [[ ${#remain_pids[@]} -gt 0 ]]; then
+    echo "[WARN] 端口 $port 仍被占用，PID: ${remain_pids[*]}"
+  elif [[ "$killed_any" -eq 1 ]]; then
+    echo "[STEP] 旧进程已清理，端口 $port 已释放"
+  else
+    echo "[STEP] 未检测到旧进程"
+  fi
+}
+
+cleanup_old_processes "$PORT"
 
 NO_PROXY_LIST="127.0.0.1,localhost,0.0.0.0,192.168.1.2"
 export NO_PROXY="${NO_PROXY:-$NO_PROXY_LIST}"
 export no_proxy="${no_proxy:-$NO_PROXY}"
 export GRADIO_ANALYTICS_ENABLED="${GRADIO_ANALYTICS_ENABLED:-False}"
+export TRANSLATE_BACKEND="${TRANSLATE_BACKEND:-ollama}"
+export OLLAMA_TRANSLATE_MODEL="${OLLAMA_TRANSLATE_MODEL:-qwen3.5:4b}"
+export ALLOW_MODELSCOPE_FALLBACK="${ALLOW_MODELSCOPE_FALLBACK:-false}"
 
 launch_http() {
   echo "[RUN] HTTP 模式: http://$HOST:$PORT"
-  exec "$PYTHON_BIN" main.py --host "$HOST" --port "$PORT"
+  exec "$PYTHON_BIN" main.py --host "$HOST" --port "$PORT" < /dev/null
 }
 
 launch_https() {
@@ -36,7 +114,8 @@ launch_https() {
     --host "$HOST" \
     --port "$PORT" \
     --ssl-certfile "$CERT_FILE" \
-    --ssl-keyfile "$KEY_FILE"
+    --ssl-keyfile "$KEY_FILE" \
+    < /dev/null
 }
 
 case "$MODE" in
