@@ -34,223 +34,196 @@ sudo apt update
 sudo apt install -y libnss3-tools mkcert
 mkcert -install
 ```
+# video2text 设计文档（Linux）
 
-### 2) 生成证书（IP + 主机名）
+## 0. 快速重启
 
 ```bash
 cd /home/lym/projects/video2text
-mkdir -p certs
-mkcert -cert-file video2text.pem -key-file video2text-key.pem 192.168.1.2 localhost 127.0.0.1
+source .venv/bin/activate
+
+./main.sh auto
 ```
 
-### 3) 使用 HTTPS 启动
+可选：
 
 ```bash
-cd /home/lym/projects/video2text
+./main.sh http
 ./main.sh https
 ```
 
-HTTPS 访问地址：`https://192.168.1.2:7880`
+默认端口 `7880`。
 
-> 若局域网其他设备首次访问仍提示证书不受信任，需要在对应设备导入并信任 mkcert 根证书。
+---
 
-## GitHub 登录与私有仓库发布
+## 1. 设计目标
 
-### 当前检查结果（2026-03-05）
+本项目目标是在 Linux 环境提供稳定的视频转字幕服务：
 
-- `gh` 已安装（`/usr/bin/gh`）
-- 当前 **未登录 GitHub**（`gh auth status` 返回未认证）
-- 当前仓库 **未配置远程地址**（`git remote -v` 无输出）
-- 当前分支：`master`（且尚无首次提交）
+- Web 页面可直接上传/复用历史文件
+- 支持 FunASR 与 faster-whisper 双后端
+- 长音频可流式显示转录进度
+- 可中断正在进行的任务
+- 支持 HTTPS 内网访问
+- 提供历史目录空间管理与删除
 
-结论：**现在不能直接创建私有仓库并推送**，需先登录。
+---
 
-### 一次性完成登录 + 创建私有仓库 + 推送
+## 2. 架构概览
+
+### 2.1 主要模块
+
+- `main.py`
+   - 构建 Gradio 界面
+   - 处理上传、参数、后端切换
+   - 管理流式输出与停止事件
+   - 启动 HTTP/HTTPS 服务
+
+- `backend/funasr_backend.py`
+   - FunASR 模型加载与缓存
+   - 模型名别名归一化
+   - 推理结果结构统一
+
+- `backend/whisper_backend.py`
+   - faster-whisper 推理封装
+   - GPU/CPU 与计算精度控制
+
+- `utils/audio.py`
+   - 视频抽音频
+   - 音频按片段切分（流式进度基础）
+
+- `utils/subtitle.py`
+   - 时间轴修正
+   - SRT 与 TXT 输出
+
+- `main.sh`
+   - 启动模式封装（`auto/http/https`）
+   - 清理旧进程
+   - 注入 HTTPS 参数与 `NO_PROXY`
+
+### 2.2 目录与数据
+
+- `workspace/`：上传文件与输出结果
+- 每个任务在对应目录内保存中间产物与最终字幕
+
+---
+
+## 3. 核心流程
+
+### 3.1 转录流程
+
+1. 选择输入（新上传或历史文件）
+2. 提取音频并切分为固定时长片段
+3. 逐片调用后端识别
+4. 片段时间映射为全局时间轴
+5. 页面持续刷新进度与日志
+6. 汇总输出 SRT 与 TXT
+
+### 3.2 停止机制
+
+- UI 的“停止转录”触发全局停止事件
+- 在分片边界立即中断后续推理
+- 通过 Gradio 取消机制结束前端任务流
+
+### 3.3 文件管理
+
+- 历史列表按目录聚合显示空间（MB）
+- 支持选定目录删除并实时刷新
+
+---
+
+## 4. 模型与性能策略
+
+### 4.1 后端定位
+
+- FunASR：中文场景速度优先
+- faster-whisper：多语言稳定性优先
+
+### 4.2 语言建议
+
+- 中文：`paraformer-zh`
+- 日语/韩语/粤语：`iic/SenseVoiceSmall`
+- 西班牙语：优先 `faster-whisper`
+- 高质量多语言：`faster-whisper large-v3`
+
+### 4.3 Tesla P4 建议
+
+- 使用 `int8`
+- 避免 `float16` / `int8_float16`
+
+---
+
+## 5. Linux 安装与运行
 
 ```bash
 cd /home/lym/projects/video2text
 
-# 1) 登录 GitHub（浏览器授权）
-gh auth login
+python3 -m venv .venv
+source .venv/bin/activate
 
-# 2) 可选：确认权限（需包含 repo）
-gh auth status -h github.com
+pip install -U pip
+pip install -e .
 
-# 3) 先避免提交敏感证书私钥
-echo "video2text-key.pem" >> .gitignore
+pip install "torch==2.3.1+cu121" "torchaudio==2.3.1+cu121" --index-url https://download.pytorch.org/whl/cu121
 
-# 4) 首次提交
-git add .
-git commit -m "init: video2text"
-
-# 5) 创建私有仓库并推送
-gh repo create video2text --private --source . --remote origin --push
+./main.sh auto
 ```
 
-### 已有私有仓库时（仅关联并推送）
+---
+
+## 6. HTTPS 方案（Linux）
+
+### 6.1 证书文件约定
+
+项目根目录使用：
+
+- `video2text.pem`
+- `video2text-key.pem`
+
+### 6.2 mkcert（推荐）
+
+```bash
+sudo apt update
+sudo apt install -y libnss3-tools mkcert
+mkcert -install
+
+cd /home/lym/projects/video2text
+mkcert -cert-file video2text.pem -key-file video2text-key.pem 192.168.1.2 localhost 127.0.0.1
+
+./main.sh https
+```
+
+### 6.3 openssl（备用）
 
 ```bash
 cd /home/lym/projects/video2text
-git remote add origin git@github.com:<你的用户名>/video2text.git
-git push -u origin master
+openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
+   -keyout video2text-key.pem \
+   -out video2text.pem \
+   -subj "/CN=192.168.1.2" \
+   -addext "subjectAltName=IP:192.168.1.2,IP:127.0.0.1,DNS:localhost"
+
+./main.sh https
 ```
 
-## 1. 项目目标
-
-本项目提供一个可在局域网访问的本地 Web 服务，用于将视频/音频转录为字幕与纯文本，优先利用 NVIDIA GPU 加速。
-
-核心目标：
-
-- 本地部署、数据不出本机
-- 支持中文优先（含普通话/粤语）与多语言场景
-- 提供可视化 WebUI，支持文件上传、进度反馈、结果下载
-- 每次任务独立落盘，便于追溯与排障
+客户端信任流程见 `installCert.md`。
 
 ---
 
-## 2. 约束与环境
+## 7. 运维与排障
 
-- OS: Linux
-- Python: 3.12（项目虚拟环境）
-- GPU: Tesla P4 (sm_61)
-- 服务监听: `0.0.0.0:7880`
+### 7.1 常用检查
 
-### 2.1 GPU 兼容策略
-
-- PyTorch 固定为 `2.3.1+cu121`（兼容 sm_61）
-- `faster-whisper` 使用 CTranslate2，`compute_type=int8`
-- 避免使用需要 Volta+ 的 `float16/int8_float16` 路径
-
----
-
-## 3. 总体架构
-
-```text
-Browser (LAN)
-   │
-   ▼
-Gradio WebUI (main.py)
-   │
-   ├─ 输入管理：上传文件、后端选择、模型选择、语言、设备
-   ├─ 流程编排：提取音频 -> ASR -> 字幕生成 -> 文件输出
-   ├─ 历史面板：展示 workspace 下已处理任务目录
-   │
-   ├─ Backend A: FunASR Paraformer (backend/funasr_backend.py)
-   └─ Backend B: faster-whisper (backend/whisper_backend.py)
-
-utils/audio.py      # ffmpeg 提取 16kHz 单声道 wav
-utils/subtitle.py   # 生成 SRT/TXT
-workspace/<job>/    # 单任务工作目录（输入、中间件、输出）
+```bash
+ss -tlnp | grep 7880
+pkill -f "main.py"
 ```
 
----
+### 7.2 常见问题
 
-## 4. 模块设计
-
-## 4.1 `main.py`
-
-职责：
-
-- Gradio 页面构建
-- 任务目录管理（`workspace/<文件名主串>/`）
-- 上传文件复制、音频提取、后端调用、结果写出
-- 实时进度反馈
-- 历史上传内容默认展示 + 手动刷新
-
-关键函数：
-
-- `_make_job_dir(original_path)`：按文件名生成任务目录
-- `_workspace_history_markdown()`：扫描 `workspace/` 并生成历史展示
-- `_do_transcribe(...)`：路由到不同 ASR 后端
-- `process(...)`：Gradio 事件主流程（生成状态/文本/下载文件）
-
-## 4.2 `backend/funasr_backend.py`
-
-职责：
-
-- 承载 FunASR Paraformer 家族模型推理
-- 模型缓存（按 `(model_name, device)` 复用）
-- 模型名归一化与兼容映射
-- 时间戳后处理与标点切分
-
-关键特性：
-
-- 通过 `AutoModel(...)` 统一加载
-- 无时间戳时使用估算时长降级，避免返回空结果
-- 支持 `language=auto/zh/yue/en/ja/ko`
-
-## 4.3 `backend/whisper_backend.py`
-
-职责：
-
-- `faster-whisper` 推理封装
-- 根据设备与精度策略自动回退
-- 输出标准化片段：`[(start_s, end_s, text), ...]`
-
-关键特性：
-
-- 针对 P4 默认使用 `int8`
-- VAD 过滤与进度估算
-
-## 4.4 `utils/audio.py`
-
-职责：
-
-- 使用 `ffmpeg` 将输入视频/音频转为 16kHz 单声道 WAV
-- 查询音频时长
-- 清理临时文件
-
-## 4.5 `utils/subtitle.py`
-
-职责：
-
-- 时间格式转换
-- 生成 SRT 字符串
-- 生成纯文本（逐行）
-- 保存到指定路径或临时文件
-
----
-
-## 5. 处理流程
-
-1. 用户上传视频/音频
-2. 生成任务目录：`workspace/<slug>/`
-3. 复制上传原文件到任务目录
-4. 提取音频为 `workspace/<slug>/audio.wav`
-5. 按后端配置执行 ASR（FunASR / faster-whisper）
-6. 生成输出：
-   - `workspace/<slug>/<原文件名>.srt`
-   - `workspace/<slug>/<原文件名>.txt`
-7. 页面返回：状态、识别文本、下载链接、历史列表刷新
-
----
-
-## 6. 后端与模型策略
-
-## 6.1 后端选择
-
-- **FunASR（Paraformer）**：中文场景优先、支持多种 Paraformer 变体
-- **faster-whisper（多语言）**：多语言泛化和生态成熟度更好
-
-## 6.2 推荐模型
-
-### FunASR 后端（当前环境实测可用）
-
-- `paraformer-zh`（普通话推荐）
-- `paraformer`（全量普通话大模型）
-- `paraformer-zh-streaming`（低延迟）
-- `paraformer-zh-spk`（角色区分，内部映射至普通话）
-- `paraformer-en`（英文）
-- `paraformer-en-spk`（英文说话人区分）
-- `iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch`（中文全路径）
-- `iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online`（中文流式全路径）
-- `iic/speech_paraformer-large-vad-punc_asr_nat-en-16k-common-vocab10020`（英文全路径）
-- `iic/SenseVoiceSmall`（多语言：中/粤/英/日/韩）
-- `iic/SenseVoice-Small`（多语言备用源）
-- `EfficientParaformer-large-zh`（大模型长语音）
-- `EfficientParaformer-zh-en`（中英双语）
-- `speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch`（全路径大模型）
-
+- 浏览器提示不安全：客户端未导入证书/根证书，或证书 SAN 不含访问地址
+- GPU 精度报错：切换到 `int8`
+- 某语言效果差：切换后端到 `faster-whisper`
 > 说明：当前环境下 FunASR 对西班牙语没有稳定的官方快捷模型别名，系统对 `es` 会自动回退到 `faster-whisper`；日语建议优先尝试 `iic/SenseVoiceSmall`。
 
 ---
