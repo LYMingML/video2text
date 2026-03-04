@@ -1,0 +1,25 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Local runtime/output files
+workspace/
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.wav
+*.srt
+*.txt
+
+# Local TLS certs/keys
+video2text.pem
+video2text-key.pem
+certs/

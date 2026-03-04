@@ -1,0 +1,29 @@
+[project]
+name = "video2text"
+version = "0.2.0"
+description = "视频转文本字幕工具，支持 FunASR Paraformer / faster-whisper 双后端，NVIDIA GPU 加速"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    # Web UI
+    "gradio>=4.0",
+    # Whisper 后端
+    "faster-whisper>=1.1.0",
+    "stable-ts>=2.17.0",
+    # FunASR 后端
+    "funasr>=1.1.0",
+    "modelscope>=1.9.0",
+    # 音视频处理
+    "ffmpeg-python>=0.2.0",
+]
+# ⚠️  Tesla P4 / Pascal GPU (CUDA Compute 6.1) 需要固定 torch 版本：
+#   uv pip install "torch==2.3.1+cu121" "torchaudio==2.3.1+cu121" \
+#       --index-url https://download.pytorch.org/whl/cu121
+# ⚠️  PyTorch >= 2.4 最低要求 sm_70 (Volta)，sm_61 (Pascal) 不支持
+
+[project.scripts]
+video2text = "main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
