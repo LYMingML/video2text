@@ -82,11 +82,65 @@ openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
 ./main.sh https
 ```
 
-## Win11 证书安装
+## Win11 证书安装（HTTPS 信任）
 
-请参考独立文档：
+本文档已内置 Win11 客户端证书信任步骤，用于访问 Linux 端 `video2text` 的 HTTPS 页面。
 
-- [installCert.md](installCert.md)
+### 1) 先确认你的证书类型
+
+- 场景 A（推荐）：Linux 使用 `mkcert` 生成服务证书
+	- Win11 需导入 `mkcert` 的根证书 `rootCA.pem`
+- 场景 B：Linux 使用 `openssl` 自签 `video2text.pem`
+	- Win11 需导入 `video2text.pem` 到根证书仓库
+
+### 2) 从 Linux 拷贝证书到 Win11
+
+只复制公钥证书，不复制私钥：
+
+- 可复制：`video2text.pem`、`rootCA.pem`
+- 禁止复制：`video2text-key.pem`、`rootCA-key.pem`
+
+建议放在：`C:\Users\<你的用户名>\Downloads\`
+
+### 3) 在 Win11 导入证书（管理员 PowerShell）
+
+导入 mkcert 根证书（场景 A）：
+
+```powershell
+$rootCert = "C:\Users\<你的用户名>\Downloads\rootCA.pem"
+Import-Certificate -FilePath $rootCert -CertStoreLocation Cert:\LocalMachine\Root
+```
+
+导入 openssl 自签证书（场景 B）：
+
+```powershell
+$serverCert = "C:\Users\<你的用户名>\Downloads\video2text.pem"
+Import-Certificate -FilePath $serverCert -CertStoreLocation Cert:\LocalMachine\Root
+```
+
+### 4) 验证导入成功
+
+```powershell
+Get-ChildItem Cert:\LocalMachine\Root |
+	Where-Object { $_.Subject -like "*192.168.1.2*" -or $_.Subject -like "*mkcert*" } |
+	Select-Object Subject, Thumbprint, NotAfter
+```
+
+若你使用域名访问，请改为匹配域名关键字。
+
+### 5) 刷新浏览器并访问
+
+1. 关闭浏览器并重开
+2. 访问：`https://192.168.1.2:7880`
+3. 若仍提示不安全：
+	 - `Win + R` → `inetcpl.cpl`
+	 - 内容 → 清除 SSL 状态
+
+### 6) 常见问题
+
+- 已导入但仍不安全：通常是访问地址不在证书 SAN，或导入仓库错误
+- mkcert 为何导入 `rootCA.pem`：服务证书由根证书签发，需先信任签发者
+- 为何不能复制 `*-key.pem`：私钥泄露会导致证书可被伪造
 
 ## 模型建议（简版）
 
@@ -118,7 +172,6 @@ video2text/
 ├── utils/
 ├── workspace/
 ├── design.md
-├── installCert.md
 └── video2text.service
 ```
 
