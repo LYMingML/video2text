@@ -493,25 +493,17 @@ def _parse_srt_segments(srt_path: Path) -> list[tuple[float, float, str]]:
     return segments
 
 
-def _build_download_bundle(job_dir: Path, file_prefix: str, kind: str) -> str:
-    """构建下载压缩包（包含原文+译文）。kind: srt/txt"""
-    orig = job_dir / f"{file_prefix}.orig.{kind}"
-    zh = job_dir / f"{file_prefix}.zh.{kind}"
-    fallback_orig = job_dir / f"{file_prefix}.{kind}"
-
-    files: list[Path] = []
-    if orig.exists():
-        files.append(orig)
-    elif fallback_orig.exists():
-        files.append(fallback_orig)
-
-    if zh.exists():
-        files.append(zh)
-
+def _build_all_bundle(job_dir: Path, file_prefix: str) -> str:
+    """将 job_dir 下属于 prefix 的所有 .srt/.txt 文件打包为单个 zip。"""
+    files = sorted(
+        p for p in job_dir.iterdir()
+        if p.is_file()
+        and p.suffix.lower() in {".srt", ".txt"}
+        and p.stem.startswith(file_prefix)
+    )
     if not files:
-        raise FileNotFoundError(f"未找到可打包的 {kind} 文件")
-
-    bundle_path = job_dir / f"{file_prefix}.{kind}.bundle.zip"
+        raise FileNotFoundError(f"未找到可打包的 srt/txt 文件（prefix={file_prefix}）")
+    bundle_path = job_dir / f"{file_prefix}.zip"
     with zipfile.ZipFile(bundle_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         for f in files:
             zf.write(f, arcname=f.name)
@@ -700,23 +692,21 @@ def translate_current_job(
     push_log(f"[OUT] 中文 SRT: {Path(zh_srt_path).name}")
     push_log(f"[OUT] 中文 TXT: {Path(zh_txt_path).name}")
 
-    srt_bundle = _build_download_bundle(job_dir, file_prefix, "srt")
-    txt_bundle = _build_download_bundle(job_dir, file_prefix, "txt")
-    push_log(f"[OUT] SRT 打包: {Path(srt_bundle).name}")
-    push_log(f"[OUT] TXT 打包: {Path(txt_bundle).name}")
+    srt_bundle = _build_all_bundle(job_dir, file_prefix)
+    push_log(f"[OUT] 打包: {Path(srt_bundle).name}")
 
     yield (
-        f"✅ 翻译完成：workspace/{job_dir.name}/（可下载原文+译文打包）",
+        f"✅ 翻译完成：workspace/{job_dir.name}/（可下载打包文件）",
         segments_to_plain(zh_segments, normalize=False),
         dump_log(),
         srt_bundle,
-        txt_bundle,
+        srt_bundle,
         job_dir.name,
         file_prefix,
     )
 
 
-def prepare_download_bundle(history_video: str, current_job: str, current_prefix: str, kind: str):
+def prepare_download_bundle(history_video: str, current_job: str, current_prefix: str, kind: str = ""):
     """下载按钮点击后动态打包当前任务文件。"""
     job_dir = _resolve_current_job(current_job, history_video)
     if not job_dir:
@@ -725,7 +715,7 @@ def prepare_download_bundle(history_video: str, current_job: str, current_prefix
     if not file_prefix:
         return None
     try:
-        return _build_download_bundle(job_dir, file_prefix, kind)
+        return _build_all_bundle(job_dir, file_prefix)
     except Exception:
         return None
 

@@ -31,8 +31,7 @@ class JobState:
     logs: list[str] = field(default_factory=list)
     current_job: str = ""
     current_prefix: str = ""
-    srt_bundle: str | None = None
-    txt_bundle: str | None = None
+    zip_bundle: str | None = None
     done: bool = False
     failed: bool = False
     running: bool = False
@@ -73,8 +72,7 @@ def _json_job(job: JobState) -> dict[str, Any]:
         "log_text": "\n".join(job.logs),
         "current_job": job.current_job,
         "current_prefix": job.current_prefix,
-        "srt_ready": bool(job.srt_bundle and Path(job.srt_bundle).exists()),
-        "txt_ready": bool(job.txt_bundle and Path(job.txt_bundle).exists()),
+        "zip_ready": bool(job.zip_bundle and Path(job.zip_bundle).exists()),
         "done": job.done,
         "failed": job.failed,
         "running": job.running,
@@ -250,6 +248,10 @@ def _run_transcribe_worker(
         save_plain(cleaned_segments, str(job_dir / f"{file_prefix}.orig.txt"), normalize=False)
         save_srt(cleaned_segments, str(job_dir / f"{file_prefix}.srt"), normalize=False)
         save_plain(cleaned_segments, str(job_dir / f"{file_prefix}.txt"), normalize=False)
+        try:
+            job.zip_bundle = _build_all_bundle(job_dir, file_prefix)
+        except Exception:
+            pass
 
         _set_job_progress(
             job,
@@ -277,27 +279,17 @@ def _normalize_lang_code(lang: str) -> str:
     return code
 
 
-def _build_target_download_bundle(job_dir: Path, file_prefix: str, kind: str, target_lang: str) -> str:
-    orig = job_dir / f"{file_prefix}.orig.{kind}"
-    fallback_orig = job_dir / f"{file_prefix}.{kind}"
-    target_file = job_dir / f"{file_prefix}.{target_lang}.{kind}"
-    zh_fallback = job_dir / f"{file_prefix}.zh.{kind}"
-
-    files: list[Path] = []
-    if orig.exists():
-        files.append(orig)
-    elif fallback_orig.exists():
-        files.append(fallback_orig)
-
-    if target_file.exists():
-        files.append(target_file)
-    elif zh_fallback.exists():
-        files.append(zh_fallback)
-
+def _build_all_bundle(job_dir: Path, file_prefix: str) -> str:
+    """将 job_dir 下所有属于该 prefix 的 .srt/.txt 文件打包为单个 zip。"""
+    files = sorted(
+        p for p in job_dir.iterdir()
+        if p.is_file()
+        and p.suffix.lower() in {".srt", ".txt"}
+        and p.stem.startswith(file_prefix)
+    )
     if not files:
-        raise FileNotFoundError(f"未找到可打包的 {kind} 文件")
-
-    bundle_path = job_dir / f"{file_prefix}.{target_lang}.{kind}.bundle.zip"
+        raise FileNotFoundError(f"未找到可打包的 srt/txt 文件（prefix={file_prefix}）")
+    bundle_path = job_dir / f"{file_prefix}.zip"
     with zipfile.ZipFile(bundle_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         for f in files:
             zf.write(f, arcname=f.name)
@@ -376,8 +368,7 @@ def _run_translate_worker(job: JobState, profile_name: str, model_name: str, tar
             save_srt(out_segments, str(job_dir / f"{file_prefix}.zh.srt"), normalize=False)
             save_plain(out_segments, str(job_dir / f"{file_prefix}.zh.txt"), normalize=False)
 
-        job.srt_bundle = _build_target_download_bundle(job_dir, file_prefix, "srt", use_target_lang)
-        job.txt_bundle = _build_target_download_bundle(job_dir, file_prefix, "txt", use_target_lang)
+        job.zip_bundle = _build_all_bundle(job_dir, file_prefix)
         _set_job_progress(
             job,
             f"✅ 翻译完成（100%，目标语言: {use_target_lang}）：workspace/{job.current_job}/",
@@ -1928,24 +1919,21 @@ def api_job_translate(job_id: str, payload: dict[str, str]):
 
 @app.get("/api/jobs/{job_id}/download/{kind}")
 def api_job_download(job_id: str, kind: str):
+    """Legacy endpoint: redirect to single zip bundle."""
     job = _get_job(job_id)
-    if kind not in {"srt", "txt"}:
-        raise HTTPException(status_code=400, detail="kind must be srt/txt")
-
-    if kind == "srt":
-        path = job.srt_bundle
-    else:
-        path = job.txt_bundle
-
+    path = job.zip_bundle
     if not path or not Path(path).exists():
-        # 动态尝试构建
         if not job.current_job:
             raise HTTPException(status_code=404, detail="bundle not found")
-        p = core.prepare_download_bundle("", job.current_job, job.current_prefix, kind)
-        if not p or not Path(p).exists():
+        job_dir = core.WORKSPACE_DIR / job.current_job
+        file_prefix = core._resolve_file_prefix(job_dir, job.current_prefix)
+        if not file_prefix:
             raise HTTPException(status_code=404, detail="bundle not found")
-        path = p
-
+        try:
+            path = _build_all_bundle(job_dir, file_prefix)
+            job.zip_bundle = path
+        except Exception:
+            raise HTTPException(status_code=404, detail="bundle not found")
     return FileResponse(path, filename=Path(path).name)
 
 

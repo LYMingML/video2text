@@ -39,21 +39,9 @@ pip install -e .
 pip install "torch==2.3.1+cu121" "torchaudio==2.3.1+cu121" --index-url https://download.pytorch.org/whl/cu121
 ```
 
-## 翻译配置（硅基流动）
+## 翻译配置
 
-在项目根目录创建 `.env`：
-
-```bash
-ONLINE_MODEL_ACTIVE_PROFILE=default
-ONLINE_MODEL_PROFILE_COUNT=1
-ONLINE_MODEL_PROFILE_1_NAME=default
-ONLINE_MODEL_PROFILE_1_BASE_URL=https://api.siliconflow.cn/v1
-ONLINE_MODEL_PROFILE_1_API_KEY=your_api_key
-ONLINE_MODEL_PROFILE_1_DEFAULT_MODEL=Kimi-K2.5
-ONLINE_MODEL_PROFILE_1_MODEL_LIST_JSON=["Kimi-K2.5"]
-```
-
-翻译按钮会读取当前激活配置组并通过硅基流动接口执行流式翻译。
+翻译功能需要一个兼容 OpenAI API 的在线模型服务（如硅基流动）。启动服务后，在 WebUI 的 **配置模型** 页面中，通过 `新建配置` 填写 `base_url`、`api_key` 并点击 `保存配置` 即可，无需手动编辑 `.env` 文件。
 
 ## 启动
 
