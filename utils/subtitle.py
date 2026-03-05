@@ -25,6 +25,22 @@ TAG_PATTERNS = [
 ]
 
 
+def _dedupe_punctuation(text: str) -> str:
+    """清理冗余标点与异常组合，保留自然停顿。"""
+    line = text
+    # 连续重复标点压缩（!!! -> !，。。。 -> 。）
+    line = re.sub(r"([。！？!?，,；;：:、…])\1+", r"\1", line)
+    # 统一中英文混合省略号
+    line = re.sub(r"(\.{3,}|…{2,})", "…", line)
+    # 移除明显冗余的混合组合标点
+    line = re.sub(r"[，,]{2,}", "，", line)
+    line = re.sub(r"[。\.]{2,}", "。", line)
+    line = re.sub(r"[!?！？]{2,}", "！", line)
+    # 去除角色前缀与正文之间多余空白
+    line = re.sub(r"^(角色\d+\s*:\s*)", lambda m: m.group(1).replace(" ", ""), line)
+    return line.strip()
+
+
 def _is_noise_text(text: str) -> bool:
     """判断是否为非字幕噪声文本（进度条/日志等）。"""
     stripped = text.strip()
@@ -47,6 +63,7 @@ def _normalize_plain_line(text: str) -> str:
     for pattern in TAG_PATTERNS:
         line = pattern.sub(" ", line)
     line = re.sub(r"\s+", " ", line).strip()
+    line = _dedupe_punctuation(line)
     if _is_noise_text(line):
         return ""
     return line

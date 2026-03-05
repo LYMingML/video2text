@@ -1,6 +1,6 @@
 """
 文本翻译工具
-使用硅基流动（SiliconFlow）API 将文本翻译为中文。
+使用硅基流动（SiliconFlow）API 将文本翻译为目标语言。
 
 配置来源：项目根目录 .env
 - ONLINE_MODEL_PROFILE_*
@@ -64,15 +64,30 @@ def _load_default_online_config() -> tuple[str, str, str]:
 
 _DEFAULT_BASE_URL, _DEFAULT_API_KEY, _DEFAULT_MODEL = _load_default_online_config()
 
-def _build_translation_prompt(source_lang: str, text: str) -> str:
+_LANG_NAME = {
+    "zh": "简体中文",
+    "en": "英语",
+    "ja": "日语",
+    "ko": "韩语",
+    "es": "西班牙语",
+    "fr": "法语",
+    "de": "德语",
+    "ru": "俄语",
+}
+
+
+def _build_translation_prompt(source_lang: str, target_lang: str, text: str) -> str:
     lang_hint = source_lang if source_lang and source_lang != "auto" else "unknown"
+    target_code = (target_lang or "zh").strip().lower() or "zh"
+    target_name = _LANG_NAME.get(target_code, target_code)
     return (
-        "你是专业字幕翻译助手。请把下面原文翻译成简体中文。\n"
+        f"你是专业字幕翻译助手。请把下面原文翻译成{target_name}。\n"
         "要求：\n"
         "1. 只输出译文，不要解释。\n"
         "2. 保持原句语气与信息，不要扩写。\n"
-        "3. 如果原文已是中文，直接输出原文。\n"
+        f"3. 如果原文已是{target_name}，直接输出原文。\n"
         f"源语言提示: {lang_hint}\n"
+        f"目标语言代码: {target_code}\n"
         f"原文: {text}"
     )
 
@@ -82,7 +97,11 @@ def _model_cache_key(base_url: str, api_key: str) -> tuple[str, str]:
     return base_url, (api_key[:12] if api_key else "")
 
 
-def list_available_models(base_url: str | None = None, api_key: str | None = None) -> list[str]:
+def list_available_models(
+    base_url: str | None = None,
+    api_key: str | None = None,
+    raise_on_error: bool = False,
+) -> list[str]:
     base = (base_url or _DEFAULT_BASE_URL).rstrip("/")
     key = (api_key if api_key is not None else _DEFAULT_API_KEY).strip()
     cache_key = _model_cache_key(base, key)
@@ -105,6 +124,8 @@ def list_available_models(base_url: str | None = None, api_key: str | None = Non
         data = obj.get("data", [])
         _MODEL_CACHE[cache_key] = [m.get("id", "") for m in data if isinstance(m, dict) and m.get("id")]
     except Exception as exc:
+        if raise_on_error:
+            raise RuntimeError(f"获取在线模型失败: {exc}") from exc
         logger.warning("获取硅基流动模型列表失败: %s", exc)
         _MODEL_CACHE[cache_key] = []
     return _MODEL_CACHE[cache_key]
@@ -138,6 +159,7 @@ def _resolve_model_name(model_name: str, base_url: str, api_key: str) -> str:
 def _translate_line_with_siliconflow(
     text: str,
     source_lang: str,
+    target_lang: str,
     model_name: str,
     base_url: str,
     api_key: str,
@@ -149,7 +171,7 @@ def _translate_line_with_siliconflow(
     if not api_key:
         raise RuntimeError("ONLINE_MODEL_PROFILE 的 API_KEY 为空，请在“配置模型”页设置")
 
-    prompt = _build_translation_prompt(source_lang, text)
+    prompt = _build_translation_prompt(source_lang, target_lang, text)
     payload = {
         "model": model_name,
         "messages": [
@@ -215,6 +237,7 @@ def _normalize_line(text: str) -> str:
 def _translate_segments_with_siliconflow(
     segments: list[tuple[float, float, str]],
     source_lang: str,
+    target_lang: str,
     log_cb: Callable[[str], None] | None,
     progress_cb: Callable[[int, int, float], None] | None = None,
     base_url: str | None = None,
@@ -241,6 +264,7 @@ def _translate_segments_with_siliconflow(
             zh_text = _translate_line_with_siliconflow(
                 line,
                 source_lang=source_lang,
+                target_lang=target_lang,
                 model_name=use_model_name,
                 base_url=use_base_url,
                 api_key=use_api_key,
@@ -263,6 +287,32 @@ def _translate_segments_with_siliconflow(
     return translated
 
 
+def translate_segments(
+    segments: list[tuple[float, float, str]],
+    source_lang: str = "auto",
+    target_lang: str = "zh",
+    log_cb: Callable[[str], None] | None = None,
+    progress_cb: Callable[[int, int, float], None] | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    model_name: str | None = None,
+) -> list[tuple[float, float, str]]:
+    """将时间轴片段翻译为目标语言，保留原时间戳。"""
+    if not segments:
+        return []
+
+    return _translate_segments_with_siliconflow(
+        segments,
+        source_lang,
+        target_lang,
+        log_cb,
+        progress_cb=progress_cb,
+        base_url=base_url,
+        api_key=api_key,
+        model_name=model_name,
+    )
+
+
 def translate_segments_to_chinese(
     segments: list[tuple[float, float, str]],
     source_lang: str = "auto",
@@ -272,14 +322,12 @@ def translate_segments_to_chinese(
     api_key: str | None = None,
     model_name: str | None = None,
 ) -> list[tuple[float, float, str]]:
-    """将时间轴片段翻译为中文，保留原时间戳。"""
-    if not segments:
-        return []
-
-    return _translate_segments_with_siliconflow(
+    """兼容旧调用：翻译为中文。"""
+    return translate_segments(
         segments,
-        source_lang,
-        log_cb,
+        source_lang=source_lang,
+        target_lang="zh",
+        log_cb=log_cb,
         progress_cb=progress_cb,
         base_url=base_url,
         api_key=api_key,

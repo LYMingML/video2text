@@ -17,6 +17,11 @@ logger = logging.getLogger(__name__)
 _model_cache: dict[tuple[str, str], object] = {}
 
 
+def _is_speaker_model(model_name: str) -> bool:
+    raw = model_name.split(" ")[0].strip().lower()
+    return "-spk" in raw or "speaker" in raw
+
+
 def _normalize_model_name(model_name: str) -> str:
     """从 UI 文本中提取真实模型名。"""
     raw = model_name.split(" ")[0].strip()
@@ -27,9 +32,12 @@ def _normalize_model_name(model_name: str) -> str:
         "iic/paraformer-zh": "paraformer-zh",
         "paraformer-zh-streaming": "paraformer-zh-streaming",
         "iic/paraformer-zh-streaming": "paraformer-zh-streaming",
+        "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online": "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online",
+        "iic/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch": "iic/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
         "paraformer-en": "paraformer-en",
         "iic/paraformer-en": "paraformer-en",
-        "iic/paraformer-zh-spk": "paraformer-zh",  # 当前版本无 spk 别名，回退普通话模型
+        # 部分环境无 spk 专用模型时，回退到基础识别模型并在后处理中做角色分段标注
+        "iic/paraformer-zh-spk": "paraformer-zh",
         "paraformer-zh-spk": "paraformer-zh",
         "paraformer-en-spk": "paraformer-en",
         "iic/paraformer-en-spk": "paraformer-en",
@@ -113,6 +121,53 @@ def _split_by_punctuation(
     return segments
 
 
+def _label_speaker_fallback(segments: list[tuple[float, float, str]]) -> list[tuple[float, float, str]]:
+    """无显式说话人信息时，按停顿时长做简单角色分段。"""
+    if not segments:
+        return []
+
+    labeled: list[tuple[float, float, str]] = []
+    speaker = 1
+    last_end = segments[0][0]
+    for start, end, text in segments:
+        if start - last_end >= 1.2:
+            speaker = 2 if speaker == 1 else 1
+        labeled.append((start, end, f"角色{speaker}: {text}"))
+        last_end = end
+    return labeled
+
+
+def _parse_sentence_info(item: dict) -> list[tuple[float, float, str, str]]:
+    """解析 FunASR 返回中的 sentence_info，说话人字段尽量兼容多种键名。"""
+    info = item.get("sentence_info") or []
+    parsed: list[tuple[float, float, str, str]] = []
+    for seg in info:
+        if not isinstance(seg, dict):
+            continue
+        txt = str(seg.get("text", "")).strip()
+        if not txt:
+            continue
+
+        start_raw = seg.get("start", seg.get("start_time", seg.get("begin", 0)))
+        end_raw = seg.get("end", seg.get("end_time", seg.get("finish", start_raw)))
+        try:
+            start = float(start_raw)
+            end = float(end_raw)
+        except Exception:
+            continue
+
+        # 兼容 ms / s 两种单位
+        if start > 1000 or end > 1000:
+            start /= 1000.0
+            end /= 1000.0
+
+        speaker = str(
+            seg.get("spk", seg.get("speaker", seg.get("speaker_id", seg.get("spkid", ""))))
+        ).strip()
+        parsed.append((start, end, txt, speaker))
+    return parsed
+
+
 def transcribe(
     audio_path: str,
     model_name: str = "paraformer-zh",
@@ -139,7 +194,9 @@ def transcribe(
         def rich_transcription_postprocess(text):
             return text
 
+    requested_model_name = model_name.split(" ")[0].strip()
     actual_model_name = _normalize_model_name(model_name)
+    speaker_mode = _is_speaker_model(requested_model_name)
 
     if progress_cb:
         progress_cb(0.0, f"加载模型: {actual_model_name}...")
@@ -168,6 +225,7 @@ def transcribe(
         return []
 
     segments: list[tuple[float, float, str]] = []
+    speaker_id_map: dict[str, int] = {}
     fallback_cursor = 0.0
     for item in res:
         raw_text = item.get("text", "").strip()
@@ -185,6 +243,21 @@ def transcribe(
         if not text:
             continue
 
+        if speaker_mode:
+            sentence_info_segments = _parse_sentence_info(item)
+            if sentence_info_segments:
+                for start_s, end_s, sentence_text, spk_raw in sentence_info_segments:
+                    spk_key = spk_raw or "unknown"
+                    if spk_key not in speaker_id_map:
+                        speaker_id_map[spk_key] = len(speaker_id_map) + 1
+                    role = speaker_id_map[spk_key]
+                    sentence_text = re.sub(r"\s+", " ", sentence_text).strip()
+                    if sentence_text:
+                        segments.append((start_s, end_s, f"角色{role}: {sentence_text}"))
+                        fallback_cursor = max(fallback_cursor, end_s)
+                # sentence_info 已提供了更细粒度时间戳，优先使用
+                continue
+
         timestamps: list[list[int]] = item.get("timestamp", [])
 
         if not timestamps:
@@ -199,6 +272,8 @@ def transcribe(
 
         # 按标点拆句，生成更精细的字幕条目
         sub_segs = _split_by_punctuation(text, timestamps)
+        if speaker_mode:
+            sub_segs = _label_speaker_fallback(sub_segs)
         segments.extend(sub_segs)
         if sub_segs:
             fallback_cursor = max(fallback_cursor, sub_segs[-1][1])
