@@ -17,6 +17,12 @@ logger = logging.getLogger(__name__)
 _model_cache: dict[tuple[str, str], object] = {}
 
 
+def _is_sensevoice_model(model_name: str) -> bool:
+    """SenseVoice 系列模型自带标点和情感标注，不需要额外 punc_model。"""
+    name = model_name.lower()
+    return "sensevoice" in name or "sense_voice" in name or "sense-voice" in name
+
+
 def _is_speaker_model(model_name: str) -> bool:
     raw = model_name.split(" ")[0].strip().lower()
     return "-spk" in raw or "speaker" in raw
@@ -76,15 +82,18 @@ def _get_model(model_name: str = "paraformer-zh", device: str = "cuda:0", speake
         )
 
     logger.info(f"加载 FunASR 模型: {model_name}（首次使用会下载模型）...")
+    is_sv = _is_sensevoice_model(model_name)
     model_kwargs = dict(
         model=model_name,
         vad_model="fsmn-vad",
         vad_kwargs={"max_single_segment_time": 30000},  # VAD 最长单段 30s
-        punc_model="ct-punc",
         device=device,
         disable_update=True,  # 不检查更新，加快启动
         hub="ms",             # 从 ModelScope 下载
     )
+    if not is_sv:
+        # SenseVoice 自带标点，加 ct-punc 反而重复加标点
+        model_kwargs["punc_model"] = "ct-punc"
     if speaker_mode:
         model_kwargs["spk_model"] = "cam++"
         logger.info("说话人分离模式：加载 cam++ 说话人模型")
@@ -231,18 +240,6 @@ def transcribe(
     if not res:
         return []
 
-    # ── 诊断日志：speaker mode 时打印第一条原始结果，帮助排查 cam++ 是否生效 ──
-    if speaker_mode:
-        first = res[0]
-        logger.info("[SPK-DIAG] res[0].keys() = %s", list(first.keys()))
-        si = first.get("sentence_info")
-        if si:
-            logger.info("[SPK-DIAG] sentence_info[0] = %s", si[0] if si else '[]')
-            logger.info("[SPK-DIAG] sentence_info count = %d", len(si))
-        else:
-            logger.warning("[SPK-DIAG] sentence_info 为空！cam++ 未生效或模型不支持说话人分离")
-        logger.info("[SPK-DIAG] res[0]['text'][:80] = %r", first.get("text", "")[:80])
-
     segments: list[tuple[float, float, str]] = []
     speaker_id_map: dict[str, int] = {}
     fallback_cursor = 0.0
@@ -252,12 +249,15 @@ def transcribe(
             continue
 
         # 去掉情感/事件标签（如 <|HAPPY|><|Speech|>）
+        # rich_transcription_postprocess 会将 SenseVoice 的 <|HAPPY|> 等转为 emoji
         text = rich_transcription_postprocess(raw_text)
         if not text:
             text = raw_text
 
-        # 二次清理残余标签，防止全是 token 导致空字幕
+        # 二次清理残余标签
         text = re.sub(r"<\|[^|>]+\|>", " ", text)
+        # 去掉 SenseVoice 情感 emoji（😊😡🎼 等），字幕只保留文字
+        text = re.sub(r"[\U0001F300-\U0001F9FF\U00002600-\U000027BF]", "", text)
         text = re.sub(r"\s+", " ", text).strip()
         if not text:
             continue
