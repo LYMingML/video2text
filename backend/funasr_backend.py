@@ -213,14 +213,17 @@ def transcribe(
     # language="auto" 让模型自动检测语言
     lang = language if language != "auto" else "auto"
 
-    res = model.generate(
+    gen_kwargs: dict = dict(
         input=audio_path,
         language=lang,
         use_itn=True,          # 逆文本规范化（数字/日期等）
-        merge_vad=True,        # 合并相邻短 VAD 段
-        merge_length_s=15,     # 合并阈值：≤15s 的相邻段合并
         batch_size_s=300,      # 分批处理，避免显存溢出（每批最多 300s 音频）
     )
+    if not speaker_mode:
+        # 说话人分离时不合并 VAD，保留说话人边界
+        gen_kwargs["merge_vad"] = True
+        gen_kwargs["merge_length_s"] = 15
+    res = model.generate(**gen_kwargs)
 
     if progress_cb:
         progress_cb(0.85, "解析时间戳...")
@@ -261,6 +264,7 @@ def transcribe(
                         fallback_cursor = max(fallback_cursor, end_s)
                 # sentence_info 已提供了更细粒度时间戳，优先使用
                 continue
+            # sentence_info 为空时降级：按标点拆句后用停顿估算角色
 
         timestamps: list[list[int]] = item.get("timestamp", [])
 
