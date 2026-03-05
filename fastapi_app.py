@@ -726,16 +726,8 @@ button:hover{transform:translateY(-1px);background:#ecfaf4}
                         </div>
                     </div>
                     <div class="drag-row">
-                        <div class="drag-item field" draggable="true">
-                            <label for="finalFileSelect">最终文件（可选下载）</label>
-                            <select id="finalFileSelect" size="6"></select>
-                        </div>
-                        <div class="drag-item stack" draggable="true">
-                            <label>&nbsp;</label>
-                            <div class="toolbar tight">
-                                <button onclick="refreshJobFiles()">刷新文件列表</button>
-                                <button onclick="downloadSelectedFile()">下载此文件</button>
-                            </div>
+                        <div class="drag-item toolbar tight" draggable="true" style="flex:none">
+                            <button onclick="downloadOutputZip()">下载输出文件</button>
                         </div>
                     </div>
                 </div>
@@ -1546,31 +1538,30 @@ function backendFormData(fd){
   fd.append('device', document.getElementById('deviceSel').value || 'CUDA');
 }
 
-async function refreshJobFiles(){
-    const sel = document.getElementById('finalFileSelect');
-    if(!sel) return;
-    sel.innerHTML = '';
-    if(!currentJobId) return;
-    try{
-        const data = await api('/api/jobs/'+currentJobId+'/files');
-        (data.files||[]).forEach(v=>{ const o=document.createElement('option'); o.value=v; o.textContent=v; sel.appendChild(o); });
-    }catch(e){
-        console.error('刷新最终文件失败', e);
-    }
-}
-
-function downloadSelectedFile(){
+async function downloadOutputZip(){
     if(!currentJobId){
         alert('请先开始并完成任务');
         return;
     }
-    const file = document.getElementById('finalFileSelect').value;
-    if(!file){
-        alert('请先选择要下载的文件');
+    let zipName = '';
+    try{
+        const data = await api('/api/jobs/'+currentJobId+'/files');
+        zipName = (data.files||[]).find(f=>f.endsWith('.zip')) || '';
+    }catch(e){
+        alert('获取文件列表失败: '+e.message);
         return;
     }
-    const url = '/api/jobs/'+currentJobId+'/download-file?file_name='+encodeURIComponent(file);
-    window.open(url, '_blank');
+    if(!zipName){
+        alert('暂无可下载的 ZIP 文件，请等待任务完成后再试。');
+        return;
+    }
+    const url = '/api/jobs/'+currentJobId+'/download-file?file_name='+encodeURIComponent(zipName);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = zipName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
 }
 
 async function startTranscribe(){
@@ -1584,7 +1575,6 @@ async function startTranscribe(){
   if(!r.ok){ throw new Error(await r.text()); }
   const data = await r.json();
   currentJobId = data.job_id;
-    await refreshJobFiles();
   startPoll();
 }
 
@@ -1616,7 +1606,6 @@ function startPoll(){
       document.getElementById('logText').value = data.log_text || '';
     updateTaskPanel(data);
             if(data.done && !data.running){
-                await refreshJobFiles();
                 clearInterval(pollTimer);
                 pollTimer = null;
             }
