@@ -30,11 +30,18 @@
 - `utils/subtitle.py`
    - 字幕清洗、时间轴归一化、SRT/TXT 序列化
 - `utils/translate.py`
-   - 翻译入口（默认 Ollama）
+   - 翻译入口（硅基流动 API）
 - `main.sh`
    - 启动与旧进程清理
 - `video2text.service`
    - systemd 服务定义
+
+UI 结构（当前）：
+
+- 标题与介绍下方：横向页面选项（单行）`主页`、`文件管理`、`配置模型`
+- 主页面：上传与选择视频入口 + 转写结果与日志
+- 文件管理页面：历史目录查看、刷新、删除
+- 配置模型页面：识别后端、语言、高级选项、在线模型配置管理
 
 ## 3. 业务流程
 
@@ -61,7 +68,7 @@
 
 1. 点击 `翻译` 按钮
 2. 读取原文 SRT
-3. 使用 Ollama 流式输出翻译并显示进度
+3. 使用硅基流动 API 流式输出翻译并显示进度
 4. 生成中文译文字幕/文本
 
 输出文件：
@@ -76,17 +83,17 @@
 
 ## 4. 翻译策略
 
-默认配置：
+默认配置（`.env`）：
 
-- `TRANSLATE_BACKEND=ollama`
-- `OLLAMA_TRANSLATE_MODEL=qwen3.5:4b`
-- `ALLOW_MODELSCOPE_FALLBACK=false`
+- `SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1`
+- `SILICONFLOW_API_KEY=<你的key>`
+- `SILICONFLOW_MODEL=Kimi-K2.5`
 
 说明：
 
-- 默认要求本机可用 `qwen3.5:4b`
-- 未安装会在翻译阶段明确提示 `ollama pull qwen3.5:4b`
-- 仅在显式开启 `ALLOW_MODELSCOPE_FALLBACK=true` 时才回退 ModelScope
+- 翻译按钮触发时按行调用硅基流动流式接口
+- 自动累计翻译进度并输出 ETA
+- API 失败时会在状态栏提示错误，不影响已生成原文文件
 
 ## 5. 运行与运维
 
@@ -118,6 +125,11 @@ systemctl status video2text --no-pager -l
 journalctl -u video2text -f
 ss -tlnp | grep 7881
 ```
+
+### 5.4 变更后执行约定
+
+- 每次代码或配置修改后，默认重启服务以使新设置生效：`sudo systemctl restart video2text`
+- 每次功能变更后，默认同步更新 `README.md` 与 `design.md`
 
 ## 6. 进度展示规则
 

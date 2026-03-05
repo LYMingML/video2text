@@ -38,7 +38,8 @@ from utils.subtitle import (
     normalize_segments_timeline,
     collect_plain_text,
 )
-from utils.translate import translate_segments_to_chinese
+from utils.translate import translate_segments_to_chinese, list_available_models
+from utils.online_models import load_profiles, save_profiles, upsert_profile, delete_profile
 
 logging.basicConfig(
     level=logging.INFO,
@@ -318,6 +319,146 @@ def _load_task_meta(job_dir: Path) -> dict:
         return {}
 
 
+def _profile_names(profiles: list[dict]) -> list[str]:
+    names = [str(p.get("name", "")).strip() for p in profiles]
+    return [n for n in names if n]
+
+
+def _find_profile(profiles: list[dict], name: str | None) -> dict | None:
+    if not profiles:
+        return None
+    name = (name or "").strip()
+    for p in profiles:
+        if p.get("name") == name:
+            return p
+    return profiles[0]
+
+
+def _model_dropdown_from_profile(profile: dict | None):
+    if not profile:
+        return gr.update(choices=[], value=None)
+    models = profile.get("models", []) or []
+    default_model = str(profile.get("default_model", "")).strip()
+    if default_model and default_model not in models:
+        models = [default_model, *models]
+    value = default_model or (models[0] if models else None)
+    return gr.update(choices=models, value=value)
+
+
+def _profile_dropdown_update(profiles: list[dict], current: str | None):
+    names = _profile_names(profiles)
+    value = current if current in names else (names[0] if names else None)
+    return gr.update(choices=names, value=value)
+
+
+def _save_profiles_with_active(profiles: list[dict], active: str | None):
+    save_profiles(profiles, active_profile=active)
+    fresh_profiles, fresh_active = load_profiles()
+    return fresh_profiles, fresh_active
+
+
+def _fetch_models_and_persist(profile_name: str, base_url: str, api_key: str, profiles: list[dict]):
+    name = (profile_name or "").strip()
+    if not name:
+        return "⚠️ 请先填写配置名称", profiles, gr.update(choices=[], value=None), gr.update(choices=[], value=None), gr.update(), gr.update()
+
+    use_base = (base_url or "").strip()
+    use_key = (api_key or "").strip()
+    if not use_base or not use_key:
+        return "⚠️ 请先填写 base_url 和 api_key", profiles, gr.update(choices=[], value=None), gr.update(choices=[], value=None), gr.update(), gr.update()
+
+    try:
+        models = list_available_models(use_base, use_key)
+    except Exception as exc:
+        return f"❌ 获取模型失败: {exc}", profiles, gr.update(choices=[], value=None), gr.update(choices=[], value=None), gr.update(), gr.update()
+
+    profile = _find_profile(profiles, name) or {"name": name, "base_url": use_base, "api_key": use_key}
+    profile["name"] = name
+    profile["base_url"] = use_base
+    profile["api_key"] = use_key
+    profile["models"] = models
+    if not str(profile.get("default_model", "")).strip() and models:
+        profile["default_model"] = models[0]
+
+    profiles = upsert_profile(profiles, profile)
+    profiles, active = _save_profiles_with_active(profiles, name)
+    selected = _find_profile(profiles, active)
+    model_update = _model_dropdown_from_profile(selected)
+
+    msg = f"✅ 获取到 {len(models)} 个可用模型，并已写入 .env"
+    return (
+        msg,
+        profiles,
+        model_update,
+        model_update,
+        _profile_dropdown_update(profiles, active),
+        _profile_dropdown_update(profiles, active),
+    )
+
+
+def _save_profile_config(profile_name: str, base_url: str, api_key: str, default_model: str, profiles: list[dict]):
+    name = (profile_name or "").strip()
+    if not name:
+        return "⚠️ 配置名称不能为空", profiles, gr.update(), gr.update(), gr.update(), gr.update()
+
+    profile = _find_profile(profiles, name) or {}
+    profile["name"] = name
+    profile["base_url"] = (base_url or "").strip()
+    profile["api_key"] = (api_key or "").strip()
+    profile["default_model"] = (default_model or "").strip()
+    if not isinstance(profile.get("models", []), list):
+        profile["models"] = []
+    if profile["default_model"] and profile["default_model"] not in profile["models"]:
+        profile["models"] = [profile["default_model"], *profile["models"]]
+
+    profiles = upsert_profile(profiles, profile)
+    profiles, active = _save_profiles_with_active(profiles, name)
+    selected = _find_profile(profiles, active)
+
+    return (
+        "✅ 配置已保存并同步到 .env",
+        profiles,
+        _profile_dropdown_update(profiles, active),
+        _profile_dropdown_update(profiles, active),
+        _model_dropdown_from_profile(selected),
+        _model_dropdown_from_profile(selected),
+    )
+
+
+def _delete_profile_config(profile_name: str, profiles: list[dict], current_main_profile: str):
+    name = (profile_name or "").strip()
+    if not name:
+        return "⚠️ 请先选择要删除的配置", profiles, gr.update(), gr.update(), gr.update(), gr.update(), ""
+
+    profiles = delete_profile(profiles, name)
+    keep_active = current_main_profile if current_main_profile != name else None
+    profiles, active = _save_profiles_with_active(profiles, keep_active)
+    selected = _find_profile(profiles, active)
+    selected_name = selected.get("name", "") if selected else ""
+    return (
+        f"✅ 已删除配置: {name}（已写入 .env）",
+        profiles,
+        _profile_dropdown_update(profiles, active),
+        _profile_dropdown_update(profiles, active),
+        _model_dropdown_from_profile(selected),
+        _model_dropdown_from_profile(selected),
+        selected_name,
+    )
+
+
+def _on_profile_selected(profile_name: str, profiles: list[dict]):
+    profile = _find_profile(profiles, profile_name)
+    if not profile:
+        return "", "", "", gr.update(choices=[], value=None), gr.update(choices=[], value=None)
+    return (
+        str(profile.get("name", "")),
+        str(profile.get("base_url", "")),
+        str(profile.get("api_key", "")),
+        _model_dropdown_from_profile(profile),
+        _model_dropdown_from_profile(profile),
+    )
+
+
 def _parse_srt_segments(srt_path: Path) -> list[tuple[float, float, str]]:
     """从 SRT 文件读取字幕段。"""
     if not srt_path.exists():
@@ -414,6 +555,8 @@ def translate_current_job(
     current_job: str,
     current_prefix: str,
     current_log: str,
+    online_profile_name: str,
+    online_model_name: str,
 ):
     """
     手动翻译当前任务：读取原文字幕，生成中文字幕，再生成下载压缩包。
@@ -485,7 +628,16 @@ def translate_current_job(
 
     meta = _load_task_meta(job_dir)
     source_lang = str(meta.get("source_lang") or "auto")
+    profiles, active = load_profiles()
+    profile = _find_profile(profiles, online_profile_name or active)
+    use_base_url = str((profile or {}).get("base_url", "")).strip()
+    use_api_key = str((profile or {}).get("api_key", "")).strip()
+    use_model_name = (online_model_name or str((profile or {}).get("default_model", "")).strip()).strip()
+
     push_log(f"[TRANS] 任务: workspace/{job_dir.name}，源语言: {source_lang}")
+    push_log(
+        f"[TRANS] 在线配置: profile={str((profile or {}).get('name', '')) or 'N/A'} model={use_model_name or 'N/A'}"
+    )
     yield (
         "⏳ 正在开始翻译...",
         "",
@@ -506,6 +658,9 @@ def translate_current_job(
                 [seg],
                 source_lang=source_lang,
                 log_cb=push_log,
+                base_url=use_base_url,
+                api_key=use_api_key,
+                model_name=use_model_name,
             )
         except Exception as exc:
             push_log(f"[ERROR] 翻译失败: {exc}")
@@ -1012,6 +1167,14 @@ def build_ui() -> gr.Blocks:
     with gr.Blocks(
         title="视频转字幕",
     ) as demo:
+        profiles_init, active_profile_init = load_profiles()
+        active_profile_obj = _find_profile(profiles_init, active_profile_init)
+        profile_names_init = _profile_names(profiles_init)
+        model_choices_init = (active_profile_obj or {}).get("models", []) if active_profile_obj else []
+        model_value_init = (
+            str((active_profile_obj or {}).get("default_model", "")).strip()
+            or (model_choices_init[0] if model_choices_init else None)
+        )
 
         gr.Markdown(
             """
@@ -1022,126 +1185,180 @@ def build_ui() -> gr.Blocks:
         )
 
         with gr.Row():
-            # ── 左侧：输入区 ──────────────────────────────────────────────
-            with gr.Column(scale=1):
-                video_input = gr.File(
-                    label="上传视频 / 音频",
-                    file_types=SUPPORTED_EXTS,
-                    file_count="single",
-                )
+            page_home_btn = gr.Button("主页", variant="primary")
+            page_file_btn = gr.Button("文件管理", variant="secondary")
+            page_model_btn = gr.Button("配置模型", variant="secondary")
 
-                history_video_select = gr.Dropdown(
-                    label="或选择历史上传视频",
-                    choices=_list_uploaded_videos(),
-                    value=_list_uploaded_videos()[0] if _list_uploaded_videos() else None,
-                    allow_custom_value=False,
-                )
+        with gr.Column(visible=True) as home_page:
+            with gr.Row():
+                # ── 左侧：输入区 ──────────────────────────────────────────────
+                with gr.Column(scale=1):
+                    video_input = gr.File(
+                        label="上传视频 / 音频",
+                        file_types=SUPPORTED_EXTS,
+                        file_count="single",
+                    )
 
-                history_md = gr.Markdown(
-                    value=_workspace_history_markdown(),
-                )
-                refresh_history_btn = gr.Button("🔄 刷新历史列表")
+                    history_video_select = gr.Dropdown(
+                        label="或选择历史上传视频",
+                        choices=_list_uploaded_videos(),
+                        value=_list_uploaded_videos()[0] if _list_uploaded_videos() else None,
+                        allow_custom_value=False,
+                    )
 
-                folder_manage_select = gr.Dropdown(
-                    label="选择要删除的历史文件夹",
-                    choices=_list_job_folders(),
-                    value=_list_job_folders()[0] if _list_job_folders() else None,
-                    allow_custom_value=False,
-                )
-                delete_folder_btn = gr.Button("🗑️ 删除选中文件夹", variant="stop")
-                folder_manage_status = gr.Textbox(
-                    label="文件管理状态",
+                # ── 右侧：输出区 ──────────────────────────────────────────────
+                with gr.Column(scale=2):
+                    with gr.Row():
+                        submit_btn = gr.Button("🚀 开始转录", variant="primary", size="lg")
+                        translate_btn = gr.Button("🌐 翻译", variant="secondary")
+                        stop_btn = gr.Button("⏹️ 停止转录", variant="secondary")
+                    with gr.Row():
+                        srt_download = gr.DownloadButton("下载SRT字幕", value=None)
+                        txt_download = gr.DownloadButton("下载纯文本", value=None)
+
+                    status_text = gr.Textbox(
+                        label="状态",
+                        value="等待上传文件...",
+                        interactive=False,
+                        max_lines=2,
+                    )
+                    plain_output = gr.Textbox(
+                        label="识别文本（可直接复制）",
+                        interactive=False,
+                        lines=18,
+                        max_lines=40,
+                        elem_classes=["output-text"],
+                    )
+                    profiles_state = gr.State(value=profiles_init)
+                    current_job_state = gr.State(value="")
+                    current_prefix_state = gr.State(value="")
+
+            with gr.Row():
+                log_output = gr.Textbox(
+                    label="运行日志（统一输出，可滚动查看）",
+                    interactive=False,
+                    lines=12,
+                    max_lines=24,
                     value="",
-                    interactive=False,
-                    max_lines=2,
                 )
 
-                backend_select = gr.Radio(
-                    label="识别后端",
-                    choices=["FunASR（Paraformer）", "faster-whisper（多语言）"],
-                    value="FunASR（Paraformer）",
-                )
-
-                language_select = gr.Dropdown(
-                    label="语言",
-                    choices=[
-                        "自动检测",
-                        "zh（普通话）",
-                        "yue（粤语）",
-                        "en（英语）",
-                        "ja（日语）",
-                        "ko（韩语）",
-                        "es（西班牙语）",
-                    ],
-                    value="自动检测",
-                )
-
-                with gr.Accordion("高级选项", open=False):
-                    funasr_model_select = gr.Dropdown(
-                        label="FunASR 模型（仅 FunASR 后端生效）",
-                        choices=[
-                            "paraformer-zh ⭐ 普通话精度推荐",
-                            "paraformer ⭐ 全量普通话大模型",
-                            "paraformer-zh-streaming ▶ 低延迟流式",
-                            "paraformer-zh-spk ▶ 角色区分优化",
-                            "paraformer-en ▶ 英文优化",
-                            "paraformer-en-spk ▶ 英文说话人区分",
-                            "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch ▶ 中文全路径(推荐)",
-                            "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online ▶ 中文流式全路径",
-                            "iic/speech_paraformer-large-vad-punc_asr_nat-en-16k-common-vocab10020 ▶ 英文全路径",
-                            "iic/SenseVoiceSmall ⭐ 多语言(中/粤/英/日/韩)",
-                            "iic/SenseVoice-Small ▶ 多语言备用源",
-                            "EfficientParaformer-large-zh ▶ 大模型长语音",
-                            "EfficientParaformer-zh-en ▶ 中英双语场景",
-                            "speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch ▶ 全路径（含 VAD/Punc）",
-                        ],
-                        value="paraformer-zh ⭐ 普通话精度推荐",
-                    )
-                    whisper_model_select = gr.Dropdown(
-                        label="Whisper 模型（仅 faster-whisper 后端生效）",
-                        choices=["tiny", "base", "small", "medium", "large-v2", "large-v3"],
-                        value="medium",
-                    )
-                    device_select = gr.Radio(
-                        label="计算设备",
-                        choices=["CUDA", "CPU"],
-                        value="CUDA",
-                    )
-
-            # ── 右侧：输出区 ──────────────────────────────────────────────
-            with gr.Column(scale=2):
-                with gr.Row():
-                    submit_btn = gr.Button("🚀 开始转录", variant="primary", size="lg")
-                    translate_btn = gr.Button("🌐 翻译", variant="secondary")
-                    stop_btn = gr.Button("⏹️ 停止转录", variant="secondary")
-                with gr.Row():
-                    srt_download = gr.DownloadButton("下载SRT字幕", value=None)
-                    txt_download = gr.DownloadButton("下载纯文本", value=None)
-
-                status_text = gr.Textbox(
-                    label="状态",
-                    value="等待上传文件...",
-                    interactive=False,
-                    max_lines=2,
-                )
-                plain_output = gr.Textbox(
-                    label="识别文本（可直接复制）",
-                    interactive=False,
-                    lines=18,
-                    max_lines=40,
-                    elem_classes=["output-text"],
-                )
-                current_job_state = gr.State(value="")
-                current_prefix_state = gr.State(value="")
-
-        with gr.Row():
-            log_output = gr.Textbox(
-                label="运行日志（统一输出，可滚动查看）",
-                interactive=False,
-                lines=12,
-                max_lines=24,
-                value="",
+        with gr.Column(visible=False) as file_manage_page:
+            history_md = gr.Markdown(
+                value=_workspace_history_markdown(),
             )
+            refresh_history_btn = gr.Button("🔄 刷新历史列表")
+            folder_manage_select = gr.Dropdown(
+                label="选择要删除的历史文件夹",
+                choices=_list_job_folders(),
+                value=_list_job_folders()[0] if _list_job_folders() else None,
+                allow_custom_value=False,
+            )
+            delete_folder_btn = gr.Button("🗑️ 删除选中文件夹", variant="stop")
+            folder_manage_status = gr.Textbox(
+                label="文件管理状态",
+                value="",
+                interactive=False,
+                max_lines=2,
+            )
+
+        with gr.Column(visible=False) as model_config_page:
+            gr.Markdown("### 配置模型\n识别参数与在线模型配置统一在本页维护，配置会自动写入项目根目录 `.env`。")
+
+            backend_select = gr.Radio(
+                label="识别后端",
+                choices=["FunASR（Paraformer）", "faster-whisper（多语言）"],
+                value="FunASR（Paraformer）",
+            )
+
+            language_select = gr.Dropdown(
+                label="语言",
+                choices=[
+                    "自动检测",
+                    "zh（普通话）",
+                    "yue（粤语）",
+                    "en（英语）",
+                    "ja（日语）",
+                    "ko（韩语）",
+                    "es（西班牙语）",
+                ],
+                value="自动检测",
+            )
+
+            with gr.Accordion("高级选项", open=False):
+                online_profile_select = gr.Dropdown(
+                    label="在线模型配置组",
+                    choices=profile_names_init,
+                    value=active_profile_init if active_profile_init in profile_names_init else (profile_names_init[0] if profile_names_init else None),
+                    allow_custom_value=False,
+                )
+                online_model_select = gr.Dropdown(
+                    label="在线模型（来自配置组可用模型）",
+                    choices=model_choices_init,
+                    value=model_value_init,
+                    allow_custom_value=True,
+                )
+                funasr_model_select = gr.Dropdown(
+                    label="FunASR 模型（仅 FunASR 后端生效）",
+                    choices=[
+                        "paraformer-zh ⭐ 普通话精度推荐",
+                        "paraformer ⭐ 全量普通话大模型",
+                        "paraformer-zh-streaming ▶ 低延迟流式",
+                        "paraformer-zh-spk ▶ 角色区分优化",
+                        "paraformer-en ▶ 英文优化",
+                        "paraformer-en-spk ▶ 英文说话人区分",
+                        "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch ▶ 中文全路径(推荐)",
+                        "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online ▶ 中文流式全路径",
+                        "iic/speech_paraformer-large-vad-punc_asr_nat-en-16k-common-vocab10020 ▶ 英文全路径",
+                        "iic/SenseVoiceSmall ⭐ 多语言(中/粤/英/日/韩)",
+                        "iic/SenseVoice-Small ▶ 多语言备用源",
+                        "EfficientParaformer-large-zh ▶ 大模型长语音",
+                        "EfficientParaformer-zh-en ▶ 中英双语场景",
+                        "speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch ▶ 全路径（含 VAD/Punc）",
+                    ],
+                    value="paraformer-zh ⭐ 普通话精度推荐",
+                )
+                whisper_model_select = gr.Dropdown(
+                    label="Whisper 模型（仅 faster-whisper 后端生效）",
+                    choices=["tiny", "base", "small", "medium", "large-v2", "large-v3"],
+                    value="medium",
+                )
+                device_select = gr.Radio(
+                    label="计算设备",
+                    choices=["CUDA", "CPU"],
+                    value="CUDA",
+                )
+
+            config_profile_select = gr.Dropdown(
+                label="选择已有配置",
+                choices=profile_names_init,
+                value=active_profile_init if active_profile_init in profile_names_init else (profile_names_init[0] if profile_names_init else None),
+                allow_custom_value=False,
+            )
+            config_profile_name = gr.Textbox(
+                label="配置名称（新增或编辑）",
+                value=str((active_profile_obj or {}).get("name", "")),
+            )
+            config_base_url = gr.Textbox(
+                label="base_url",
+                value=str((active_profile_obj or {}).get("base_url", "https://api.siliconflow.cn/v1")),
+            )
+            config_api_key = gr.Textbox(
+                label="api_key",
+                value=str((active_profile_obj or {}).get("api_key", "")),
+                type="password",
+            )
+            config_model_select = gr.Dropdown(
+                label="该配置默认模型",
+                choices=model_choices_init,
+                value=model_value_init,
+                allow_custom_value=True,
+            )
+            with gr.Row():
+                fetch_models_btn = gr.Button("获取可用模型列表", variant="secondary")
+                save_profile_btn = gr.Button("保存配置", variant="primary")
+                delete_profile_btn = gr.Button("删除配置", variant="stop")
+
+            config_status = gr.Textbox(label="配置状态", value="", interactive=False, max_lines=3)
 
         # ── 事件绑定 ──────────────────────────────────────────────────────
         submit_event = submit_btn.click(
@@ -1170,7 +1387,14 @@ def build_ui() -> gr.Blocks:
 
         translate_btn.click(
             fn=translate_current_job,
-            inputs=[history_video_select, current_job_state, current_prefix_state, log_output],
+            inputs=[
+                history_video_select,
+                current_job_state,
+                current_prefix_state,
+                log_output,
+                online_profile_select,
+                online_model_select,
+            ],
             outputs=[
                 status_text,
                 plain_output,
@@ -1226,6 +1450,113 @@ def build_ui() -> gr.Blocks:
             fn=_delete_job_folder,
             inputs=[folder_manage_select],
             outputs=[folder_manage_status, history_md, history_video_select, folder_manage_select],
+        )
+
+        def _switch_subpage(page_name: str):
+            return (
+                gr.update(visible=page_name == "主页"),
+                gr.update(visible=page_name == "文件管理"),
+                gr.update(visible=page_name == "配置模型"),
+                gr.update(variant="primary" if page_name == "主页" else "secondary"),
+                gr.update(variant="primary" if page_name == "文件管理" else "secondary"),
+                gr.update(variant="primary" if page_name == "配置模型" else "secondary"),
+            )
+
+        page_home_btn.click(
+            fn=lambda: _switch_subpage("主页"),
+            outputs=[home_page, file_manage_page, model_config_page, page_home_btn, page_file_btn, page_model_btn],
+        )
+
+        page_file_btn.click(
+            fn=lambda: _switch_subpage("文件管理"),
+            outputs=[home_page, file_manage_page, model_config_page, page_home_btn, page_file_btn, page_model_btn],
+        )
+
+        page_model_btn.click(
+            fn=lambda: _switch_subpage("配置模型"),
+            outputs=[home_page, file_manage_page, model_config_page, page_home_btn, page_file_btn, page_model_btn],
+        )
+
+        online_profile_select.change(
+            fn=lambda name: gr.update(value=name),
+            inputs=[online_profile_select],
+            outputs=[config_profile_select],
+        )
+
+        online_profile_select.change(
+            fn=_on_profile_selected,
+            inputs=[online_profile_select, profiles_state],
+            outputs=[
+                config_profile_name,
+                config_base_url,
+                config_api_key,
+                online_model_select,
+                config_model_select,
+            ],
+        )
+
+        config_profile_select.change(
+            fn=lambda name: gr.update(value=name),
+            inputs=[config_profile_select],
+            outputs=[online_profile_select],
+        )
+
+        config_profile_select.change(
+            fn=_on_profile_selected,
+            inputs=[config_profile_select, profiles_state],
+            outputs=[
+                config_profile_name,
+                config_base_url,
+                config_api_key,
+                online_model_select,
+                config_model_select,
+            ],
+        )
+
+        config_model_select.change(
+            fn=lambda model_name: gr.update(value=model_name),
+            inputs=[config_model_select],
+            outputs=[online_model_select],
+        )
+
+        fetch_models_btn.click(
+            fn=_fetch_models_and_persist,
+            inputs=[config_profile_name, config_base_url, config_api_key, profiles_state],
+            outputs=[
+                config_status,
+                profiles_state,
+                config_model_select,
+                online_model_select,
+                config_profile_select,
+                online_profile_select,
+            ],
+        )
+
+        save_profile_btn.click(
+            fn=_save_profile_config,
+            inputs=[config_profile_name, config_base_url, config_api_key, config_model_select, profiles_state],
+            outputs=[
+                config_status,
+                profiles_state,
+                config_profile_select,
+                online_profile_select,
+                config_model_select,
+                online_model_select,
+            ],
+        )
+
+        delete_profile_btn.click(
+            fn=_delete_profile_config,
+            inputs=[config_profile_select, profiles_state, online_profile_select],
+            outputs=[
+                config_status,
+                profiles_state,
+                config_profile_select,
+                online_profile_select,
+                config_model_select,
+                online_model_select,
+                config_profile_name,
+            ],
         )
 
     return demo

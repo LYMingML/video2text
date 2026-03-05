@@ -11,7 +11,7 @@
 - 音频分片策略：每片 120 秒，相邻分片 10 秒重叠覆盖
 - 一键停止当前转录
 - 转录阶段仅生成原文字幕与原文纯文本
-- 手动点击 `翻译` 按钮后生成中文译文字幕与中文译文纯文本
+- 手动点击 `翻译` 按钮后，调用硅基流动模型生成中文译文字幕与中文译文纯文本
 - `下载SRT字幕`、`下载纯文本` 按钮点击后自动下载 zip（含原文+译文）
 
 ## 环境要求
@@ -20,7 +20,7 @@
 - Python 3.12
 - `ffmpeg` / `ffprobe`
 - NVIDIA GPU（可选）
-- Ollama（用于本地翻译，默认 `qwen3.5:4b`）
+- 可访问硅基流动 API（用于翻译）
 
 > ffmpeg 音频提取默认优先尝试 NVIDIA 硬件加速（CUDA/NVDEC），失败自动回退 CPU。
 
@@ -39,15 +39,17 @@ pip install -e .
 pip install "torch==2.3.1+cu121" "torchaudio==2.3.1+cu121" --index-url https://download.pytorch.org/whl/cu121
 ```
 
-## Ollama 翻译模型
+## 翻译配置（硅基流动）
 
-项目默认使用：`qwen3.5:4b`
+在项目根目录创建 `.env`：
 
 ```bash
-ollama pull qwen3.5:4b
+SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1
+SILICONFLOW_API_KEY=sk-fimfhlsmwcqzvohhpsttvhksphnjhekoovfsdlzdwipghnnn
+SILICONFLOW_MODEL=Kimi-K2.5
 ```
 
-若拉取报“需要更新 Ollama”，先升级 Ollama 再拉取。
+翻译按钮会读取上述配置并通过硅基流动接口执行流式翻译。
 
 ## 启动
 
@@ -70,6 +72,14 @@ chmod +x main.sh
 4. 系统生成译文文件：`*.zh.srt`、`*.zh.txt`
 5. 点击 `下载SRT字幕` 或 `下载纯文本`
 6. 自动下载 zip，内含原文+译文对应文件
+
+## 页面结构
+
+- 主页面左侧输入区仅保留：`上传视频 / 音频`、`选择历史上传视频`
+- 标题与介绍下方提供横向页面选项（单行）：`主页`、`文件管理`、`配置模型`
+- 点击页面选项后切换对应页面内容
+- `文件管理` 页面包含历史目录查看、刷新、删除
+- `配置模型` 页面包含：识别后端、语言、高级选项、在线模型配置管理
 
 ## 进度说明
 
@@ -120,6 +130,11 @@ ss -tlnp | grep 7881
 # 重启服务
 sudo systemctl restart video2text
 ```
+
+## 维护约定
+
+- 每次代码或配置变更后，默认执行服务重启以确保新设置生效：`sudo systemctl restart video2text`
+- 每次功能调整后，默认同步更新文档（`README.md`、`design.md`）
 
 ## 详细设计
 

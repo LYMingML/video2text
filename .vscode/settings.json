@@ -1,0 +1,21 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^cd /home/lym/projects/video2text && python -m py_compile main\\.py backend/funasr_backend\\.py backend/whisper_backend\\.py utils/audio\\.py utils/subtitle\\.py$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^cd /home/lym/projects/video2text && python -m py_compile main\\.py$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^cd /home/lym/projects/video2text && bash -n main\\.sh$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^cd /home/lym/projects/video2text && python -m py_compile utils/audio\\.py$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "ss": true
+    }
+}

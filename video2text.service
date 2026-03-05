@@ -25,9 +25,6 @@ StartLimitBurst=3
 # 环境变量
 Environment="PYTHONUNBUFFERED=1"
 Environment="GRADIO_ANALYTICS_ENABLED=false"
-Environment="TRANSLATE_BACKEND=ollama"
-Environment="OLLAMA_TRANSLATE_MODEL=qwen3.5:4b"
-Environment="ALLOW_MODELSCOPE_FALLBACK=false"
 # 如需指定 CUDA 设备，取消注释：
 # Environment="CUDA_VISIBLE_DEVICES=0"
 

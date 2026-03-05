@@ -99,9 +99,6 @@ NO_PROXY_LIST="127.0.0.1,localhost,0.0.0.0,192.168.1.2"
 export NO_PROXY="${NO_PROXY:-$NO_PROXY_LIST}"
 export no_proxy="${no_proxy:-$NO_PROXY}"
 export GRADIO_ANALYTICS_ENABLED="${GRADIO_ANALYTICS_ENABLED:-False}"
-export TRANSLATE_BACKEND="${TRANSLATE_BACKEND:-ollama}"
-export OLLAMA_TRANSLATE_MODEL="${OLLAMA_TRANSLATE_MODEL:-qwen3.5:4b}"
-export ALLOW_MODELSCOPE_FALLBACK="${ALLOW_MODELSCOPE_FALLBACK:-false}"
 
 launch_http() {
   echo "[RUN] HTTP 模式: http://$HOST:$PORT"
