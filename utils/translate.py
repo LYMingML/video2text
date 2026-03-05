@@ -3,9 +3,7 @@
 使用硅基流动（SiliconFlow）API 将文本翻译为中文。
 
 配置来源：项目根目录 .env
-- SILICONFLOW_BASE_URL
-- SILICONFLOW_API_KEY
-- SILICONFLOW_MODEL
+- ONLINE_MODEL_PROFILE_*
 """
 
 from __future__ import annotations
@@ -18,6 +16,8 @@ import time
 import urllib.error
 import urllib.request
 from typing import Callable
+
+from utils.online_models import load_profiles
 
 logger = logging.getLogger(__name__)
 
@@ -48,12 +48,21 @@ def _load_dotenv(path: str):
 
 _load_dotenv(_ENV_PATH)
 
-_DEFAULT_BASE_URL = os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1").rstrip("/")
-_DEFAULT_API_KEY = os.getenv(
-    "SILICONFLOW_API_KEY",
-    "sk-fimfhlsmwcqzvohhpsttvhksphnjhekoovfsdlzdwipghnnn",
-).strip()
-_DEFAULT_MODEL = os.getenv("SILICONFLOW_MODEL", "Pro/moonshotai/Kimi-K2.5").strip()
+def _load_default_online_config() -> tuple[str, str, str]:
+    try:
+        profiles, active = load_profiles()
+        profile = next((p for p in profiles if p.get("name") == active), profiles[0] if profiles else None)
+        if profile:
+            base_url = str(profile.get("base_url", "https://api.siliconflow.cn/v1")).strip() or "https://api.siliconflow.cn/v1"
+            api_key = str(profile.get("api_key", "")).strip()
+            model = str(profile.get("default_model", "Pro/moonshotai/Kimi-K2.5")).strip() or "Pro/moonshotai/Kimi-K2.5"
+            return base_url.rstrip("/"), api_key, model
+    except Exception as exc:
+        logger.warning("读取在线模型默认配置失败: %s", exc)
+    return "https://api.siliconflow.cn/v1", "", "Pro/moonshotai/Kimi-K2.5"
+
+
+_DEFAULT_BASE_URL, _DEFAULT_API_KEY, _DEFAULT_MODEL = _load_default_online_config()
 
 def _build_translation_prompt(source_lang: str, text: str) -> str:
     lang_hint = source_lang if source_lang and source_lang != "auto" else "unknown"
@@ -138,7 +147,7 @@ def _translate_line_with_siliconflow(
         return _LINE_CACHE[cache_key]
 
     if not api_key:
-        raise RuntimeError("SILICONFLOW_API_KEY 为空，请在 .env 或在线配置中设置")
+        raise RuntimeError("ONLINE_MODEL_PROFILE 的 API_KEY 为空，请在“配置模型”页设置")
 
     prompt = _build_translation_prompt(source_lang, text)
     payload = {

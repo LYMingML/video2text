@@ -63,10 +63,10 @@ def load_profiles() -> tuple[list[dict], str]:
         )
 
     if not profiles:
-        # 回退到单组默认配置
-        base_url = env.get("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1").strip()
-        api_key = env.get("SILICONFLOW_API_KEY", "").strip()
-        model = env.get("SILICONFLOW_MODEL", "Pro/moonshotai/Kimi-K2.5").strip()
+        # 无配置时初始化默认配置组
+        base_url = "https://api.siliconflow.cn/v1"
+        api_key = ""
+        model = "Pro/moonshotai/Kimi-K2.5"
         profiles = [
             {
                 "name": "default",
@@ -145,11 +145,10 @@ def save_profiles(profiles: list[dict], active_profile: str | None = None):
     chosen = active_profile if active_profile in names else clean_profiles[0]["name"]
     env["ONLINE_MODEL_ACTIVE_PROFILE"] = chosen
 
-    # 与旧逻辑保持兼容：同步默认翻译配置
-    active_obj = next((p for p in clean_profiles if p["name"] == chosen), clean_profiles[0])
-    env["SILICONFLOW_BASE_URL"] = active_obj["base_url"] or "https://api.siliconflow.cn/v1"
-    env["SILICONFLOW_API_KEY"] = active_obj["api_key"]
-    env["SILICONFLOW_MODEL"] = active_obj["default_model"] or "Pro/moonshotai/Kimi-K2.5"
+    # 清理已废弃的重复配置键
+    env.pop("SILICONFLOW_BASE_URL", None)
+    env.pop("SILICONFLOW_API_KEY", None)
+    env.pop("SILICONFLOW_MODEL", None)
 
     _write_env_map(env)
 

@@ -72,8 +72,8 @@ cleanup_old_processes() {
     done
   fi
 
-  # 2) 再按命令行兜底清理当前项目的 main.py 进程
-  mapfile -t main_pids < <(pgrep -f "${PROJECT_DIR}/main.py|main.py --host|main.py --port" 2>/dev/null || true)
+  # 2) 再按命令行兜底清理当前项目进程
+  mapfile -t main_pids < <(pgrep -f "${PROJECT_DIR}/main.py|${PROJECT_DIR}/fastapi_app.py|fastapi_app.py --host|fastapi_app.py --port" 2>/dev/null || true)
   if [[ ${#main_pids[@]} -gt 0 ]]; then
     echo "[KILL] 兜底清理 main.py 进程，PID: ${main_pids[*]}"
     for pid in "${main_pids[@]}"; do
@@ -102,12 +102,12 @@ export GRADIO_ANALYTICS_ENABLED="${GRADIO_ANALYTICS_ENABLED:-False}"
 
 launch_http() {
   echo "[RUN] HTTP 模式: http://$HOST:$PORT"
-  exec "$PYTHON_BIN" main.py --host "$HOST" --port "$PORT" < /dev/null
+  exec "$PYTHON_BIN" fastapi_app.py --host "$HOST" --port "$PORT" < /dev/null
 }
 
 launch_https() {
   echo "[RUN] HTTPS 模式: https://$HOST:$PORT"
-  exec "$PYTHON_BIN" main.py \
+  exec "$PYTHON_BIN" fastapi_app.py \
     --host "$HOST" \
     --port "$PORT" \
     --ssl-certfile "$CERT_FILE" \

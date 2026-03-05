@@ -16,11 +16,12 @@
 
 核心模块：
 
+- `fastapi_app.py`
+   - FastAPI 路由与页面
+   - 任务状态管理与轮询接口
+   - 转写/翻译/下载 API
 - `main.py`
-   - UI 与事件绑定
-   - 转录流式处理
-   - 手动翻译处理
-   - 打包下载逻辑
+   - 复用核心转写流程函数（无 UI 入口）
 - `backend/funasr_backend.py`
    - FunASR 推理封装与模型缓存
 - `backend/whisper_backend.py`
@@ -36,12 +37,19 @@
 - `video2text.service`
    - systemd 服务定义
 
-UI 结构（当前）：
+UI 结构（当前，FastAPI 页面）：
 
 - 标题与介绍下方：横向页面选项（单行）`主页`、`文件管理`、`配置模型`
 - 主页面：上传与选择视频入口 + 转写结果与日志
 - 文件管理页面：历史目录查看、刷新、删除
 - 配置模型页面：识别后端、语言、高级选项、在线模型配置管理
+
+API 结构（当前）：
+
+- `/api/history` 历史数据
+- `/api/transcribe/start` / `/api/jobs/{id}` / `/api/jobs/{id}/stop`
+- `/api/jobs/{id}/translate` / `/api/jobs/{id}/download/{kind}`
+- `/api/model/profiles*` 在线模型配置 CRUD
 
 ## 3. 业务流程
 
@@ -85,9 +93,13 @@ UI 结构（当前）：
 
 默认配置（`.env`）：
 
-- `SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1`
-- `SILICONFLOW_API_KEY=<你的key>`
-- `SILICONFLOW_MODEL=Kimi-K2.5`
+- `ONLINE_MODEL_ACTIVE_PROFILE=default`
+- `ONLINE_MODEL_PROFILE_COUNT=1`
+- `ONLINE_MODEL_PROFILE_1_NAME=default`
+- `ONLINE_MODEL_PROFILE_1_BASE_URL=https://api.siliconflow.cn/v1`
+- `ONLINE_MODEL_PROFILE_1_API_KEY=<你的key>`
+- `ONLINE_MODEL_PROFILE_1_DEFAULT_MODEL=Kimi-K2.5`
+- `ONLINE_MODEL_PROFILE_1_MODEL_LIST_JSON=["Kimi-K2.5"]`
 
 说明：
 

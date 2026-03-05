@@ -1,6 +1,6 @@
 # video2text
 
-本项目是一个 Linux 本地 WebUI，用于将视频/音频转为字幕与纯文本，支持 GPU 加速、历史任务管理、HTTPS、手动翻译与打包下载。
+本项目是一个 Linux 本地 FastAPI WebUI，用于将视频/音频转为字幕与纯文本，支持 GPU 加速、历史任务管理、HTTPS、手动翻译与打包下载。
 
 ## 主要功能
 
@@ -44,12 +44,16 @@ pip install "torch==2.3.1+cu121" "torchaudio==2.3.1+cu121" --index-url https://d
 在项目根目录创建 `.env`：
 
 ```bash
-SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1
-SILICONFLOW_API_KEY=sk-fimfhlsmwcqzvohhpsttvhksphnjhekoovfsdlzdwipghnnn
-SILICONFLOW_MODEL=Kimi-K2.5
+ONLINE_MODEL_ACTIVE_PROFILE=default
+ONLINE_MODEL_PROFILE_COUNT=1
+ONLINE_MODEL_PROFILE_1_NAME=default
+ONLINE_MODEL_PROFILE_1_BASE_URL=https://api.siliconflow.cn/v1
+ONLINE_MODEL_PROFILE_1_API_KEY=your_api_key
+ONLINE_MODEL_PROFILE_1_DEFAULT_MODEL=Kimi-K2.5
+ONLINE_MODEL_PROFILE_1_MODEL_LIST_JSON=["Kimi-K2.5"]
 ```
 
-翻译按钮会读取上述配置并通过硅基流动接口执行流式翻译。
+翻译按钮会读取当前激活配置组并通过硅基流动接口执行流式翻译。
 
 ## 启动
 
@@ -60,6 +64,9 @@ chmod +x main.sh
 ./main.sh auto
 ./main.sh http
 ./main.sh https
+
+# 或直接启动 FastAPI
+.venv/bin/python fastapi_app.py --host 0.0.0.0 --port 7881
 ```
 
 默认端口：`7881`
@@ -80,6 +87,17 @@ chmod +x main.sh
 - 点击页面选项后切换对应页面内容
 - `文件管理` 页面包含历史目录查看、刷新、删除
 - `配置模型` 页面包含：识别后端、语言、高级选项、在线模型配置管理
+
+## FastAPI 接口（核心）
+
+- `GET /health` 健康检查
+- `GET /api/history` 历史视频与任务目录
+- `POST /api/transcribe/start` 启动转写任务
+- `POST /api/jobs/{job_id}/stop` 停止转写任务
+- `POST /api/jobs/{job_id}/translate` 启动翻译任务
+- `GET /api/jobs/{job_id}` 轮询任务状态
+- `GET /api/jobs/{job_id}/download/{kind}` 下载打包结果
+- `GET/POST /api/model/*` 在线模型配置管理
 
 ## 进度说明
 

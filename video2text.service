@@ -14,7 +14,7 @@ WorkingDirectory=/home/lym/projects/video2text
 ExecStartPre=/usr/bin/bash -lc '/usr/bin/fuser -k 7881/tcp >/dev/null 2>&1 || true'
 
 # 使用 venv 内的 Python
-ExecStart=/home/lym/projects/video2text/.venv/bin/python main.py --host 0.0.0.0 --port 7881 --ssl-certfile /home/lym/projects/video2text/video2text.pem --ssl-keyfile /home/lym/projects/video2text/video2text-key.pem
+ExecStart=/home/lym/projects/video2text/.venv/bin/python fastapi_app.py --host 0.0.0.0 --port 7881 --ssl-certfile /home/lym/projects/video2text/video2text.pem --ssl-keyfile /home/lym/projects/video2text/video2text-key.pem
 
 # 崩溃后自动重启，最多 3 次（5 分钟内）
 Restart=on-failure
