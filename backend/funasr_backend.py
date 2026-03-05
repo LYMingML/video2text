@@ -231,6 +231,18 @@ def transcribe(
     if not res:
         return []
 
+    # ── 诊断日志：speaker mode 时打印第一条原始结果，帮助排查 cam++ 是否生效 ──
+    if speaker_mode:
+        first = res[0]
+        logger.info("[SPK-DIAG] res[0].keys() = %s", list(first.keys()))
+        si = first.get("sentence_info")
+        if si:
+            logger.info("[SPK-DIAG] sentence_info[0] = %s", si[0] if si else '[]')
+            logger.info("[SPK-DIAG] sentence_info count = %d", len(si))
+        else:
+            logger.warning("[SPK-DIAG] sentence_info 为空！cam++ 未生效或模型不支持说话人分离")
+        logger.info("[SPK-DIAG] res[0]['text'][:80] = %r", first.get("text", "")[:80])
+
     segments: list[tuple[float, float, str]] = []
     speaker_id_map: dict[str, int] = {}
     fallback_cursor = 0.0

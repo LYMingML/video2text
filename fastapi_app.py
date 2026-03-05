@@ -195,6 +195,13 @@ def _run_transcribe_worker(
         job_dir = core._make_job_dir(video_path)
         orig_name = p.name
         file_prefix = p.stem
+        # 清理本目录之前生成的全部文本/字幕/打包文件，避免旧内容混入
+        for old in list(job_dir.iterdir()):
+            if old.is_file() and old.suffix.lower() in {".srt", ".txt", ".zip"}:
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
         dest = job_dir / orig_name
         if not dest.exists():
             shutil.copy2(video_path, dest)
