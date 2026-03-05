@@ -57,13 +57,13 @@ def _normalize_model_name(model_name: str) -> str:
     return alias_map.get(raw, raw)
 
 
-def _get_model(model_name: str = "paraformer-zh", device: str = "cuda:0"):
+def _get_model(model_name: str = "paraformer-zh", device: str = "cuda:0", speaker_mode: bool = False):
     """
     懒加载并缓存 FunASR AutoModel 实例。
     首次调用会从 ModelScope 下载模型（约 500MB）。
     """
     model_name = _normalize_model_name(model_name)
-    cache_key = (model_name, device)
+    cache_key = (model_name, device, speaker_mode)
     if cache_key in _model_cache:
         return _model_cache[cache_key]
 
@@ -76,7 +76,7 @@ def _get_model(model_name: str = "paraformer-zh", device: str = "cuda:0"):
         )
 
     logger.info(f"加载 FunASR 模型: {model_name}（首次使用会下载模型）...")
-    model = AutoModel(
+    model_kwargs = dict(
         model=model_name,
         vad_model="fsmn-vad",
         vad_kwargs={"max_single_segment_time": 30000},  # VAD 最长单段 30s
@@ -85,6 +85,10 @@ def _get_model(model_name: str = "paraformer-zh", device: str = "cuda:0"):
         disable_update=True,  # 不检查更新，加快启动
         hub="ms",             # 从 ModelScope 下载
     )
+    if speaker_mode:
+        model_kwargs["spk_model"] = "cam++"
+        logger.info("说话人分离模式：加载 cam++ 说话人模型")
+    model = AutoModel(**model_kwargs)
     logger.info(f"FunASR 模型加载完成: {model_name}")
     _model_cache[cache_key] = model
     return model
@@ -201,7 +205,7 @@ def transcribe(
     if progress_cb:
         progress_cb(0.0, f"加载模型: {actual_model_name}...")
 
-    model = _get_model(model_name=actual_model_name, device=device)
+    model = _get_model(model_name=actual_model_name, device=device, speaker_mode=speaker_mode)
 
     if progress_cb:
         progress_cb(0.1, f"{actual_model_name} 语音识别中...")

@@ -1947,11 +1947,14 @@ def api_job_files(job_id: str):
     if not job_dir.exists() or not job_dir.is_dir():
         return {"files": []}
 
-    allowed_ext = {".srt", ".txt", ".zip"}
+    canonical_zip = f"{job.current_job}.zip"
     files = [
         p.name
         for p in sorted(job_dir.iterdir(), key=lambda x: x.name.lower())
-        if p.is_file() and p.suffix.lower() in allowed_ext
+        if p.is_file() and (
+            p.suffix.lower() in {".srt", ".txt"}
+            or p.name == canonical_zip
+        )
     ]
     return {"files": files}
 
