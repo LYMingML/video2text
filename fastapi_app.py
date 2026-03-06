@@ -1933,10 +1933,9 @@ def api_download_url(payload: dict):
     def _rename_to_title(fp: str) -> Path:
         """将临时下载目录改名为 title 前 20 字符（仅过滤文件系统非法字符）。"""
         title_stem = Path(fp).stem
-        # 只去掉 Linux 文件名中不允许的字符（/ 和 \0），其余原样保留
-        safe = re.sub(r'[/\x00]', '_', title_stem).strip()[:20] or "download"
-        slug = safe
-        target = Path(core.WORKSPACE_DIR) / slug
+        # 只去掉文件系统不允许的字符，与 _make_job_dir 保持一致
+        safe = re.sub(r'[/\x00]', '', title_stem).strip()[:20] or "download"
+        target = Path(core.WORKSPACE_DIR) / safe
         # 若目标已存在，把文件移入
         target.mkdir(parents=True, exist_ok=True)
         new_fp = target / Path(fp).name
@@ -2046,11 +2045,15 @@ def api_transcribe_start(
     video_path = ""
     temp_path: Path | None = None
     if video_file is not None and video_file.filename:
-        suffix = Path(video_file.filename).suffix or ".bin"
-        temp_path = Path(core.WORKSPACE_DIR) / f"upload_{uuid.uuid4().hex}{suffix}"
-        with temp_path.open("wb") as f:
+        orig_name = Path(video_file.filename).name
+        safe_stem = re.sub(r'[/\x00]', '', Path(video_file.filename).stem).strip()[:20] or "media"
+        dest_dir = Path(core.WORKSPACE_DIR) / safe_stem
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        save_path = dest_dir / orig_name
+        with save_path.open("wb") as f:
             shutil.copyfileobj(video_file.file, f)
-        video_path = str(temp_path)
+        video_path = str(save_path)
+        # 文件已在正确位置，无需后续清理
     elif history_video:
         video_path = core._resolve_input_path(None, history_video) or ""
 
