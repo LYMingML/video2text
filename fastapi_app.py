@@ -1913,61 +1913,44 @@ def _find_ytdlp() -> str:
 
 @app.post("/api/download_url")
 def api_download_url(payload: dict):
-    """使用 yt-dlp 下载视频或音频，自动尝试从浏览器获取 Cookie。"""
+    """使用 yt-dlp 下载视频或音频，直接下载到以 title 前 20 字符命名的目录。"""
     url = (payload.get("url") or "").strip()
     if not url:
         raise HTTPException(status_code=400, detail="URL 不能为空")
 
-    if not shutil.which("yt-dlp") and not any(
-        (Path.home() / rel).is_file()
-        for rel in ["miniconda3/bin/yt-dlp", ".local/bin/yt-dlp", "anaconda3/bin/yt-dlp"]
-    ):
+    ytdlp_bin = _find_ytdlp()
+    if not Path(ytdlp_bin).is_file() and not shutil.which(ytdlp_bin):
         raise HTTPException(status_code=500, detail="yt-dlp 未安装，请运行: pip install yt-dlp")
 
-    ytdlp_bin = _find_ytdlp()
-    _tmp_dir = Path(core.WORKSPACE_DIR) / f"_dl_tmp_{uuid.uuid4().hex[:10]}"
-    _tmp_dir.mkdir(parents=True, exist_ok=True)
-    output_tmpl = str(_tmp_dir / "%(title).100B.%(ext)s")
     project_root = Path(__file__).resolve().parent
 
-    def _rename_to_title(fp: str) -> Path:
-        """将临时下载目录改名为 title 前 20 字符（仅过滤文件系统非法字符）。"""
-        title_stem = Path(fp).stem
-        # 只去掉文件系统不允许的字符，与 _make_job_dir 保持一致
-        safe = re.sub(r'[/\x00]', '', title_stem).strip()[:20] or "download"
-        target = Path(core.WORKSPACE_DIR) / safe
-        # 若目标已存在，把文件移入
-        target.mkdir(parents=True, exist_ok=True)
-        new_fp = target / Path(fp).name
-        shutil.move(fp, str(new_fp))
-        try:
-            _tmp_dir.rmdir()  # 已空则删除
-        except Exception:
-            pass
-        return new_fp
-
-    dl_dir = _tmp_dir  # for _cleanup()
-
-    base_args = [
-        ytdlp_bin, "--no-playlist",
-        "-f", "bestaudio[ext=m4a]/bestaudio/best",
-        "--no-mtime",
-        "-o", output_tmpl,
-        "--print", "after_move:filepath",
-    ]
-
-    login_kw = [
-        "login", "sign in", "private", "not logged in",
-        "authentication required", "subscriber", "members only",
-        "premium", "http error 401", "http error 403",
-    ]
+    login_kw = ["login", "sign in", "private", "not logged in",
+                "authentication required", "subscriber", "members only",
+                "premium", "http error 401", "http error 403"]
 
     def _is_login_err(text: str) -> bool:
         t = text.lower()
         return any(k in t for k in login_kw)
 
-    def _run(extra: list[str]) -> tuple[int, str, str]:
-        cmd = base_args + extra + [url]
+    def _cookie_args(browser: str | None) -> list[str]:
+        return ["--cookies-from-browser", browser] if browser else []
+
+    def _get_title(cookie_extra: list[str]) -> str | None:
+        """先用 --simulate 拿 title，不产生任何文件。"""
+        cmd = [ytdlp_bin, "--no-playlist", "--simulate",
+               "--print", "title"] + cookie_extra + [url]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if r.returncode == 0:
+            lines = [l for l in r.stdout.strip().splitlines() if l.strip()]
+            return lines[-1] if lines else None
+        return None
+
+    def _download(dest_dir: Path, cookie_extra: list[str]) -> tuple[int, str, str]:
+        output_tmpl = str(dest_dir / "%(title).200B.%(ext)s")
+        cmd = [ytdlp_bin, "--no-playlist",
+               "-f", "bestaudio[ext=m4a]/bestaudio/best",
+               "--no-mtime", "-o", output_tmpl,
+               "--print", "after_move:filepath"] + cookie_extra + [url]
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         return r.returncode, r.stdout, r.stderr
 
@@ -1975,55 +1958,46 @@ def api_download_url(payload: dict):
         lines = [l for l in stdout.strip().splitlines() if l.strip()]
         return lines[-1] if lines else ""
 
-    def _cleanup():
-        try:
-            if dl_dir.exists() and not any(dl_dir.iterdir()):
-                dl_dir.rmdir()
-        except Exception:
-            pass
+    def _title_to_dir(title: str) -> Path:
+        safe = re.sub(r'[/\x00]', '', title).strip()[:20] or "media"
+        d = Path(core.WORKSPACE_DIR) / safe
+        d.mkdir(parents=True, exist_ok=True)
+        return d
 
-    for browser in ["chrome", "chromium", "firefox", "edge"]:
+    # 尝试顺序：各浏览器 cookie → 无 cookie
+    browser_attempts: list[str | None] = ["chrome", "chromium", "firefox", "edge", None]
+
+    for browser in browser_attempts:
+        extra = _cookie_args(browser)
+        # 先拿 title
         try:
-            rc, out, err = _run(["--cookies-from-browser", browser])
+            title = _get_title(extra)
         except subprocess.TimeoutExpired:
-            _cleanup()
+            continue
+        if title is None:
+            # simulate 失败，检查是否登录错误
+            continue
+
+        dest_dir = _title_to_dir(title)
+        # 正式下载
+        try:
+            rc, out, err = _download(dest_dir, extra)
+        except subprocess.TimeoutExpired:
             raise HTTPException(status_code=504, detail="下载超时（最多 10 分钟）")
+
         if rc == 0:
             fp = _extract_path(out)
             if fp and Path(fp).exists():
-                new_fp = _rename_to_title(fp)
-                return {"filepath": new_fp.relative_to(project_root).as_posix(),
-                        "filename": new_fp.name}
+                return {"filepath": Path(fp).relative_to(project_root).as_posix(),
+                        "filename": Path(fp).name}
+
         combined = out + err
-        # Login error is definitive — no point trying other browsers
-        if _is_login_err(combined) and "cookie" not in combined.lower() and "browser" not in combined.lower():
-            _cleanup()
+        if _is_login_err(combined):
             raise HTTPException(status_code=401,
                 detail="该视频需要登录才能访问，请先在浏览器中登录目标网站，然后重试。")
 
-    # Final attempt without cookies
-    try:
-        rc, out, err = _run([])
-    except subprocess.TimeoutExpired:
-        _cleanup()
-        raise HTTPException(status_code=504, detail="下载超时（最多 10 分钟）")
-
-    if rc == 0:
-        fp = _extract_path(out)
-        if fp and Path(fp).exists():
-            new_fp = _rename_to_title(fp)
-            return {"filepath": new_fp.relative_to(project_root).as_posix(),
-                    "filename": new_fp.name}
-
-    combined = out + err
-    if _is_login_err(combined):
-        _cleanup()
-        raise HTTPException(status_code=401,
-            detail="该视频需要登录才能访问，请先在浏览器中登录目标网站，然后重试。")
-
-    _cleanup()
-    detail = (err or out).strip()[-600:]
-    raise HTTPException(status_code=500, detail=f"下载失败：{detail}")
+    # 全部尝试失败
+    raise HTTPException(status_code=500, detail="下载失败：无法获取视频信息，请检查 URL 或网络")
 
 
 @app.post("/api/transcribe/start")
