@@ -217,15 +217,21 @@ def _pick_funasr_model_for_language(
     model = selected_model
     multilingual_best = "iic/SenseVoiceSmall"
 
-    # 非中文语言：自动切换到 FunASR 多语言强模型。
+    # 非中文语言：自动切换到 FunASR 多语言强模型（说话人分离模型不切换）。
     non_zh_langs = {"en", "ja", "ko", "es"}
     if lang_code in non_zh_langs:
-        if model.split(" ")[0].strip() != multilingual_best:
+        model_key = model.split(" ")[0].strip().lower()
+        if model_key.split("/")[-1].split(" ")[0] != "sensevoicesmall" and not any(k in model_key for k in ("-spk", "speaker")):
             if log_cb:
                 log_cb(
                     f"[MODEL-AUTO] 检测到 {lang_code} 语言，FunASR 自动切换为 {multilingual_best}"
                 )
             model = multilingual_best
+        return model
+
+    # 说话人分离模型不做自动切换，保留用户的选择。
+    model_key = model.split(" ")[0].strip().lower()
+    if any(k in model_key for k in ("-spk", "speaker")):
         return model
 
     # 自动检测时优先多语言模型，减少跨语种误配导致的慢响应。
