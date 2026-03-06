@@ -5,6 +5,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -1620,6 +1621,9 @@ async function downloadVideoUrl(){
       }
     }
     if(typeof syncSelectionStates==='function') syncSelectionStates();
+    // 自动开始转录
+    document.getElementById('statusText').value = '⏳ 下载完成，正在启动转录…';
+    await startTranscribe();
   }catch(e){
     alert('❌ '+e.message);
     document.getElementById('statusText').value = '❌ 下载失败';
@@ -1890,6 +1894,23 @@ def api_delete_profile(payload: dict[str, str]):
     return {"message": f"✅ 已删除配置: {name}"}
 
 
+def _find_ytdlp() -> str:
+    """找到最合适的 yt-dlp 可执行文件，优先使用与当前 Python 同环境的新版本。"""
+    home = Path.home()
+    candidates = [
+        Path(sys.executable).parent / "yt-dlp",      # 同 venv/env
+        home / ".local" / "bin" / "yt-dlp",
+        home / "miniconda3" / "bin" / "yt-dlp",
+        home / "miniconda" / "bin" / "yt-dlp",
+        home / "anaconda3" / "bin" / "yt-dlp",
+        home / "miniforge3" / "bin" / "yt-dlp",
+    ]
+    for c in candidates:
+        if c.is_file():
+            return str(c)
+    return shutil.which("yt-dlp") or "yt-dlp"
+
+
 @app.post("/api/download_url")
 def api_download_url(payload: dict):
     """使用 yt-dlp 下载视频或音频，自动尝试从浏览器获取 Cookie。"""
@@ -1897,16 +1918,20 @@ def api_download_url(payload: dict):
     if not url:
         raise HTTPException(status_code=400, detail="URL 不能为空")
 
-    if not shutil.which("yt-dlp"):
+    if not shutil.which("yt-dlp") and not any(
+        (Path.home() / rel).is_file()
+        for rel in ["miniconda3/bin/yt-dlp", ".local/bin/yt-dlp", "anaconda3/bin/yt-dlp"]
+    ):
         raise HTTPException(status_code=500, detail="yt-dlp 未安装，请运行: pip install yt-dlp")
 
+    ytdlp_bin = _find_ytdlp()
     dl_dir = Path(core.WORKSPACE_DIR) / f"download_{uuid.uuid4().hex[:10]}"
     dl_dir.mkdir(parents=True, exist_ok=True)
     output_tmpl = str(dl_dir / "%(title).100B.%(ext)s")
-    project_root = Path(__file__).parent
+    project_root = Path(__file__).resolve().parent
 
     base_args = [
-        "yt-dlp", "--no-playlist",
+        ytdlp_bin, "--no-playlist",
         "-f", "bestaudio[ext=m4a]/bestaudio/best",
         "--no-mtime",
         "-o", output_tmpl,
