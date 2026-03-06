@@ -1931,9 +1931,11 @@ def api_download_url(payload: dict):
     project_root = Path(__file__).resolve().parent
 
     def _rename_to_title(fp: str) -> Path:
-        """将临时下载目录改名为 title 前 20 字符的 slug。"""
+        """将临时下载目录改名为 title 前 20 字符（仅过滤文件系统非法字符）。"""
         title_stem = Path(fp).stem
-        slug = re.sub(r'[^\w\u4e00-\u9fff]+', '_', title_stem).strip('_')[:20] or "download"
+        # 只去掉 Linux 文件名中不允许的字符（/ 和 \0），其余原样保留
+        safe = re.sub(r'[/\x00]', '_', title_stem).strip()[:20] or "download"
+        slug = safe
         target = Path(core.WORKSPACE_DIR) / slug
         # 若目标已存在，把文件移入
         target.mkdir(parents=True, exist_ok=True)
