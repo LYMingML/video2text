@@ -136,8 +136,8 @@ def _delete_job_folder(folder_name: str | None):
 def _make_job_dir(original_path: str) -> Path:
     """根据上传文件名创建 workspace/<slug>/ 子目录，返回目录路径。"""
     stem = Path(original_path).stem
-    # 保留中文、字母、数字，其余替换为下划线
-    slug = re.sub(r'[^\w\u4e00-\u9fff]+', '_', stem).strip('_')[:60]
+    # 保留中文、字母、数字，其余替换为下划线，最多取前 20 字符
+    slug = re.sub(r'[^\w\u4e00-\u9fff]+', '_', stem).strip('_')[:20]
     slug = slug or "upload"
     job_dir = WORKSPACE_DIR / slug
     job_dir.mkdir(parents=True, exist_ok=True)

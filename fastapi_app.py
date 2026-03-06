@@ -1925,10 +1925,27 @@ def api_download_url(payload: dict):
         raise HTTPException(status_code=500, detail="yt-dlp 未安装，请运行: pip install yt-dlp")
 
     ytdlp_bin = _find_ytdlp()
-    dl_dir = Path(core.WORKSPACE_DIR) / f"download_{uuid.uuid4().hex[:10]}"
-    dl_dir.mkdir(parents=True, exist_ok=True)
-    output_tmpl = str(dl_dir / "%(title).100B.%(ext)s")
+    _tmp_dir = Path(core.WORKSPACE_DIR) / f"_dl_tmp_{uuid.uuid4().hex[:10]}"
+    _tmp_dir.mkdir(parents=True, exist_ok=True)
+    output_tmpl = str(_tmp_dir / "%(title).100B.%(ext)s")
     project_root = Path(__file__).resolve().parent
+
+    def _rename_to_title(fp: str) -> Path:
+        """将临时下载目录改名为 title 前 20 字符的 slug。"""
+        title_stem = Path(fp).stem
+        slug = re.sub(r'[^\w\u4e00-\u9fff]+', '_', title_stem).strip('_')[:20] or "download"
+        target = Path(core.WORKSPACE_DIR) / slug
+        # 若目标已存在，把文件移入
+        target.mkdir(parents=True, exist_ok=True)
+        new_fp = target / Path(fp).name
+        shutil.move(fp, str(new_fp))
+        try:
+            _tmp_dir.rmdir()  # 已空则删除
+        except Exception:
+            pass
+        return new_fp
+
+    dl_dir = _tmp_dir  # for _cleanup()
 
     base_args = [
         ytdlp_bin, "--no-playlist",
@@ -1973,8 +1990,9 @@ def api_download_url(payload: dict):
         if rc == 0:
             fp = _extract_path(out)
             if fp and Path(fp).exists():
-                return {"filepath": Path(fp).relative_to(project_root).as_posix(),
-                        "filename": Path(fp).name}
+                new_fp = _rename_to_title(fp)
+                return {"filepath": new_fp.relative_to(project_root).as_posix(),
+                        "filename": new_fp.name}
         combined = out + err
         # Login error is definitive — no point trying other browsers
         if _is_login_err(combined) and "cookie" not in combined.lower() and "browser" not in combined.lower():
@@ -1992,8 +2010,9 @@ def api_download_url(payload: dict):
     if rc == 0:
         fp = _extract_path(out)
         if fp and Path(fp).exists():
-            return {"filepath": Path(fp).relative_to(project_root).as_posix(),
-                    "filename": Path(fp).name}
+            new_fp = _rename_to_title(fp)
+            return {"filepath": new_fp.relative_to(project_root).as_posix(),
+                    "filename": new_fp.name}
 
     combined = out + err
     if _is_login_err(combined):
