@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import subprocess
 import threading
 import time
 import uuid
@@ -694,6 +695,15 @@ button:hover{transform:translateY(-1px);background:#ecfaf4}
                         <div class="drag-item field" draggable="true">
                             <label for="statusText">状态</label>
                             <input id="statusText" class="status" readonly />
+                        </div>
+                    </div>
+                    <div class="drag-row">
+                        <div class="drag-item field" draggable="true" style="flex:1">
+                            <label for="urlInput">视频URL</label>
+                            <input type="url" id="urlInput" placeholder="https://www.youtube.com/watch?v=..." />
+                        </div>
+                        <div class="drag-item toolbar tight" draggable="true" style="flex:none;align-self:flex-end">
+                            <button id="urlDownloadBtn" onclick="downloadVideoUrl()">下载视频</button>
                         </div>
                     </div>
                     <div class="drag-row">
@@ -1572,6 +1582,53 @@ async function downloadOutputZip(){
     document.body.removeChild(a);
 }
 
+async function downloadVideoUrl(){
+  const url = (document.getElementById('urlInput').value||'').trim();
+  if(!url){ alert('请输入视频URL'); return; }
+  const btn = document.getElementById('urlDownloadBtn');
+  const origText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '下载中…';
+  document.getElementById('statusText').value = '⏳ 正在下载视频…';
+  try{
+    const r = await fetch('/api/download_url',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({url})
+    });
+    if(r.status===401){
+      const d = await r.json().catch(()=>({}));
+      alert('⚠️ 需要登录：'+(d.detail||'请先在浏览器中登录目标网站，然后重试。'));
+      document.getElementById('statusText').value = '⚠️ 需要登录';
+      return;
+    }
+    if(!r.ok){
+      const d = await r.json().catch(()=>({}));
+      throw new Error(d.detail||'下载失败');
+    }
+    const data = await r.json();
+    document.getElementById('statusText').value = '✅ 下载完成: '+data.filename;
+    document.getElementById('urlInput').value = '';
+    await refreshHistory();
+    const hv = document.getElementById('historyVideo');
+    if(data.filepath){
+      hv.value = data.filepath;
+      if(!hv.value){
+        for(const opt of hv.options){
+          if(opt.value.includes(data.filename)){ hv.value=opt.value; break; }
+        }
+      }
+    }
+    if(typeof syncSelectionStates==='function') syncSelectionStates();
+  }catch(e){
+    alert('❌ '+e.message);
+    document.getElementById('statusText').value = '❌ 下载失败';
+  }finally{
+    btn.disabled=false;
+    btn.textContent=origText;
+  }
+}
+
 async function startTranscribe(){
   const fd = new FormData();
   const f = document.getElementById('videoFile').files[0];
@@ -1831,6 +1888,97 @@ def api_delete_profile(payload: dict[str, str]):
     profiles = delete_profile(profiles, name)
     save_profiles(profiles, active_profile=(active if active != name else None))
     return {"message": f"✅ 已删除配置: {name}"}
+
+
+@app.post("/api/download_url")
+def api_download_url(payload: dict):
+    """使用 yt-dlp 下载视频或音频，自动尝试从浏览器获取 Cookie。"""
+    url = (payload.get("url") or "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="URL 不能为空")
+
+    if not shutil.which("yt-dlp"):
+        raise HTTPException(status_code=500, detail="yt-dlp 未安装，请运行: pip install yt-dlp")
+
+    dl_dir = Path(core.WORKSPACE_DIR) / f"download_{uuid.uuid4().hex[:10]}"
+    dl_dir.mkdir(parents=True, exist_ok=True)
+    output_tmpl = str(dl_dir / "%(title).100B.%(ext)s")
+    project_root = Path(__file__).parent
+
+    base_args = [
+        "yt-dlp", "--no-playlist",
+        "-f", "bestaudio[ext=m4a]/bestaudio/best",
+        "--no-mtime",
+        "-o", output_tmpl,
+        "--print", "after_move:filepath",
+    ]
+
+    login_kw = [
+        "login", "sign in", "private", "not logged in",
+        "authentication required", "subscriber", "members only",
+        "premium", "http error 401", "http error 403",
+    ]
+
+    def _is_login_err(text: str) -> bool:
+        t = text.lower()
+        return any(k in t for k in login_kw)
+
+    def _run(extra: list[str]) -> tuple[int, str, str]:
+        cmd = base_args + extra + [url]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        return r.returncode, r.stdout, r.stderr
+
+    def _extract_path(stdout: str) -> str:
+        lines = [l for l in stdout.strip().splitlines() if l.strip()]
+        return lines[-1] if lines else ""
+
+    def _cleanup():
+        try:
+            if dl_dir.exists() and not any(dl_dir.iterdir()):
+                dl_dir.rmdir()
+        except Exception:
+            pass
+
+    for browser in ["chrome", "chromium", "firefox", "edge"]:
+        try:
+            rc, out, err = _run(["--cookies-from-browser", browser])
+        except subprocess.TimeoutExpired:
+            _cleanup()
+            raise HTTPException(status_code=504, detail="下载超时（最多 10 分钟）")
+        if rc == 0:
+            fp = _extract_path(out)
+            if fp and Path(fp).exists():
+                return {"filepath": Path(fp).relative_to(project_root).as_posix(),
+                        "filename": Path(fp).name}
+        combined = out + err
+        # Login error is definitive — no point trying other browsers
+        if _is_login_err(combined) and "cookie" not in combined.lower() and "browser" not in combined.lower():
+            _cleanup()
+            raise HTTPException(status_code=401,
+                detail="该视频需要登录才能访问，请先在浏览器中登录目标网站，然后重试。")
+
+    # Final attempt without cookies
+    try:
+        rc, out, err = _run([])
+    except subprocess.TimeoutExpired:
+        _cleanup()
+        raise HTTPException(status_code=504, detail="下载超时（最多 10 分钟）")
+
+    if rc == 0:
+        fp = _extract_path(out)
+        if fp and Path(fp).exists():
+            return {"filepath": Path(fp).relative_to(project_root).as_posix(),
+                    "filename": Path(fp).name}
+
+    combined = out + err
+    if _is_login_err(combined):
+        _cleanup()
+        raise HTTPException(status_code=401,
+            detail="该视频需要登录才能访问，请先在浏览器中登录目标网站，然后重试。")
+
+    _cleanup()
+    detail = (err or out).strip()[-600:]
+    raise HTTPException(status_code=500, detail=f"下载失败：{detail}")
 
 
 @app.post("/api/transcribe/start")

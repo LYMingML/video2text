@@ -258,8 +258,11 @@ VIDEO_EXTS = {
 }
 
 
+_ALL_MEDIA_EXTS = {ext.lower() for ext in SUPPORTED_EXTS}
+
+
 def _list_uploaded_videos(max_items: int = 200) -> list[str]:
-    """列出 workspace 中历史上传的视频文件（相对路径）。"""
+    """列出 workspace 中历史上传的视频/音频文件（相对路径）。"""
     results: list[tuple[float, str]] = []
     for job_dir in WORKSPACE_DIR.iterdir():
         if not job_dir.is_dir():
@@ -267,7 +270,7 @@ def _list_uploaded_videos(max_items: int = 200) -> list[str]:
         for f in job_dir.iterdir():
             if not f.is_file():
                 continue
-            if f.suffix.lower() not in VIDEO_EXTS:
+            if f.suffix.lower() not in _ALL_MEDIA_EXTS:
                 continue
             rel = f.relative_to(Path(__file__).parent).as_posix()
             results.append((f.stat().st_mtime, rel))
