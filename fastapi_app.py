@@ -1114,6 +1114,7 @@ function selectFolder(folderName){
     if(!select) return;
     select.value = folderName;
     select.dispatchEvent(new Event('change', {bubbles:true}));
+    applyFolderFilter();
     syncSelectionStates();
 }
 

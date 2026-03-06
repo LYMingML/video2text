@@ -184,6 +184,70 @@ def segments_to_plain(segments: list[tuple], normalize: bool = True) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _extract_role(text: str) -> str | None:
+    """从 '角色N: ...' 中提取角色标识，失败返回 None。"""
+    m = re.match(r'^(角色\d+)[:：]', text.strip())
+    return m.group(1) if m else None
+
+
+def _strip_role_prefix(text: str) -> str:
+    """去掉 '角色N: ' 前缀，返回纯文字内容。"""
+    return re.sub(r'^角色\d+[:：]\s*', '', text.strip())
+
+
+def is_speaker_segments(segments: list[tuple]) -> bool:
+    """判断 segments 是否含有说话人标注。"""
+    for _, _, t in segments:
+        if _extract_role(t):
+            return True
+    return False
+
+
+def format_speaker_script(segments: list[tuple]) -> str:
+    """
+    将含说话人标注的 segments 格式化为脚本样式：
+    同一角色的连续台词合并在同一块下，换角色时换行分块。
+    每块显示角色名称和起始时间戳。
+    """
+    if not segments:
+        return ""
+
+    lines: list[str] = []
+    cur_role: str | None = None
+    cur_lines: list[str] = []
+    cur_start: float = 0.0
+
+    def flush():
+        if cur_role and cur_lines:
+            h = int(cur_start) // 3600
+            m = (int(cur_start) % 3600) // 60
+            s = int(cur_start) % 60
+            ts = f"{h:02d}:{m:02d}:{s:02d}"
+            lines.append(f"【{cur_role}】（{ts}）")
+            for l in cur_lines:
+                lines.append(l)
+            lines.append("")
+
+    for start, _end, text in segments:
+        normalized = _normalize_plain_line(text)
+        if not normalized:
+            continue
+        role = _extract_role(normalized)
+        content = _strip_role_prefix(normalized) if role else normalized
+        if not content:
+            continue
+        if role != cur_role:
+            flush()
+            cur_role = role or "旁白"
+            cur_lines = [content]
+            cur_start = start
+        else:
+            cur_lines.append(content)
+    flush()
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def save_srt(
     segments: list[tuple], output_path: str = None, normalize: bool = True
 ) -> str:
@@ -204,15 +268,22 @@ def save_srt(
 def save_plain(
     segments: list[tuple], output_path: str = None, normalize: bool = True
 ) -> str:
-    """保存纯文本文件，返回文件路径"""
+    """保存纯文本文件，返回文件路径。
+    若 segments 含说话人标注，自动使用脚本格式按角色分块输出。
+    """
+    if is_speaker_segments(segments):
+        content = format_speaker_script(segments)
+    else:
+        content = segments_to_plain(segments, normalize=normalize)
+
     if output_path is None:
         tmp = tempfile.NamedTemporaryFile(
             suffix=".txt", prefix="v2t_", delete=False, mode="w", encoding="utf-8"
         )
         output_path = tmp.name
-        tmp.write(segments_to_plain(segments, normalize=normalize))
+        tmp.write(content)
         tmp.close()
     else:
         with open(output_path, "w", encoding="utf-8") as f:
-            f.write(segments_to_plain(segments, normalize=normalize))
+            f.write(content)
     return output_path
