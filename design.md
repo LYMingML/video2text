@@ -73,7 +73,7 @@ API 结构（当前）：
 
 ### 3.1 转录（自动）
 
-1. 上传或选择历史视频
+1. 上传文件 **或** 粘贴视频 URL（yt-dlp 后台下载后自动启动转录）
 2. ffmpeg 提取 WAV
 3. 按时长分片并识别
 4. 生成并保存原文字幕/文本
@@ -90,7 +90,50 @@ API 结构（当前）：
 - `<prefix>.orig.txt`
 - 兼容保留：`<prefix>.srt`、`<prefix>.txt`
 
-### 3.2 翻译（手动）
+### 3.2 在线视频下载（yt-dlp）
+
+`/api/download_url` 端点接收视频 URL，两步完成下载：
+
+1. **获取标题**：`yt-dlp --simulate --print title <url>` — 快速，不下载媒体，仅返回视频标题
+2. **直接下载**：`yt-dlp -o <title_20>/<title>.%(ext)s <url>` — 直接写入最终目录，无临时目录
+
+工作区目录名 = `re.sub(r'[/\x00]', '', title).strip()[:20] or "media"`。
+
+Cookie 策略：依次尝试 chrome → chromium → firefox → edge 读取浏览器 cookie，全部失败则以无 cookie 方式重试（适用于公开视频）。
+
+yt-dlp 查找顺序（`_find_ytdlp()`）：
+1. `sys.executable` 同级目录（venv 内）
+2. `~/.local/bin/yt-dlp`
+3. `~/miniconda3/bin/yt-dlp`
+4. `~/anaconda3/bin/yt-dlp`
+5. `shutil.which("yt-dlp")`（系统 PATH）
+
+### 3.3 说话人分离
+
+选择 `-spk` 后缀模型（如 `paraformer-zh-spk`）时，FunASR 返回带角色标记的 segments（`角色N:` 前缀）。`utils/subtitle.py` 的 `save_plain()` 检测到说话人 segments 后，调用 `format_speaker_script()` 以如下格式输出：
+
+```
+【角色1】（00:00:03）
+你好，欢迎来到节目。
+
+【角色2】（00:00:07）
+谢谢邀请，很高兴来这里。
+```
+
+SRT 保留原始时间轴与角色前缀，纯文本按角色分组。MODEL-AUTO 推理不会将 `-spk` 模型替换为其他模型。
+
+### 3.4 工作区目录命名
+
+| 场景 | 目录名规则 |
+|------|-----------|
+| 本地上传 | `re.sub(r'[/\x00]', '', filename_stem).strip()[:20]` |
+| URL 下载 | `re.sub(r'[/\x00]', '', title).strip()[:20]` |
+
+仅去除 `/` 和空字节，保留中文、标点等全部字符，最多取前 20 字符，空则回退 `"media"` / `"upload"`。
+
+`_run_transcribe_worker` 中，若文件已在 `workspace/` 子目录内，直接复用 `p.parent` 作为 `job_dir`，不再调用 `_make_job_dir`，避免因 slug 规则差异生成冗余目录。
+
+### 3.5 翻译（手动）
 
 1. 点击 `翻译` 按钮
 2. 读取原文 SRT
@@ -178,12 +221,19 @@ ss -tlnp | grep 7881
 
 典型文件：
 
-- 原始输入媒体
-- `<prefix>.wav`
-- `<prefix>.orig.srt` / `<prefix>.orig.txt`
-- `<prefix>.zh.srt` / `<prefix>.zh.txt`（点击翻译后）
-- `<prefix>.srt.bundle.zip` / `<prefix>.txt.bundle.zip`（点击下载按钮后）
-- `task_meta.json`（记录源语言、前缀等）
+- 原始输入媒体（`.mp4`、`.m4a` 等，文件名保持原始名或视频标题）
+- `<prefix>.wav`（ffmpeg 提取的音频，识别后可保留）
+- `<prefix>.orig.srt` / `<prefix>.orig.txt`（转录原文）
+- `<prefix>.<lang>.srt` / `<prefix>.<lang>.txt`（翻译后，如 `.zh.srt`、`.en.srt`）
+- `<prefix>.srt` / `<prefix>.txt`（兼容保留，同 orig）
+- `<prefix>.zip`（打包 bundle，点击下载后生成）
+- `task_meta.json`（记录 `file_prefix`、`lang_code`、`source_lang`、`is_non_zh`）
+
+目录名规则（上传/下载均相同）：
+
+```python
+safe = re.sub(r'[/\x00]', '', name).strip()[:20] or fallback
+```
 
 ## 9. 异常处理
 
@@ -191,7 +241,37 @@ ss -tlnp | grep 7881
 - 后台挂起：ffmpeg 使用 `-nostdin`，主进程 stdin 重定向 `/dev/null`
 - 翻译失败：状态栏与日志输出错误原因，不影响已有原文文件
 
-## 10. 后续可选优化
+## 10. 安装与依赖
+
+### 安装脚本（`install.sh`）
+
+`install.sh` 全自动完成以下步骤，支持 Ubuntu 20.04/22.04/24.04：
+
+| 步骤 | 内容 |
+|------|------|
+| 系统包 | `apt install python3.12 ffmpeg build-essential ...` |
+| uv | 从 `https://astral.sh/uv/install.sh` 安装 |
+| .venv | `uv venv .venv --python 3.12` |
+| 依赖 | `uv pip install -e .` |
+| PyTorch | 按 `nvidia-smi` 返回的 compute_cap 选版本（sm < 70 → 2.3.1+cu121；sm 7x+ → 最新 cu124；无 GPU → CPU） |
+| yt-dlp | `curl` 下载最新二进制到 `~/.local/bin/yt-dlp` |
+| workspace | `mkdir -p workspace/` |
+| mkcert（可选） | `SETUP_HTTPS=1` 时，安装 mkcert 并生成证书 |
+| systemd（可选） | `SETUP_SYSTEMD=1` 时，替换服务文件中的用户名/路径并注册服务 |
+
+### PyTorch 版本约束
+
+- Tesla P4 / Pascal（sm_61）最高支持 `torch==2.3.1+cu121`
+- PyTorch ≥ 2.4 要求最低 sm_70（Volta）
+- `install.sh` 自动检测，无需手动指定
+
+### yt-dlp
+
+- 安装位置：`~/.local/bin/yt-dlp`（由 `install.sh` 写入）
+- 更新：`curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ~/.local/bin/yt-dlp`
+- 服务内查找顺序：venv bin → ~/.local/bin → miniconda → anaconda → system PATH
+
+## 11. 后续可选优化
 
 - 翻译按钮执行中禁用，避免重复触发
 - 增加“仅翻译新增段”缓存策略
