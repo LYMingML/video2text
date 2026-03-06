@@ -194,7 +194,15 @@ def _run_transcribe_worker(
         if not p.exists():
             raise RuntimeError(f"输入文件不存在: {video_path}")
 
-        job_dir = core._make_job_dir(video_path)
+        # 若文件已在 workspace 子目录内（上传/下载场景），直接复用其所在目录，
+        # 避免 _make_job_dir 的 slug 逻辑生成不同名字的冗余目录。
+        _ws_resolved = core.WORKSPACE_DIR.resolve()
+        try:
+            p.resolve().relative_to(_ws_resolved)
+            job_dir = p.parent
+            job_dir.mkdir(parents=True, exist_ok=True)
+        except ValueError:
+            job_dir = core._make_job_dir(video_path)
         orig_name = p.name
         file_prefix = p.stem
         # 清理本目录之前生成的全部文本/字幕/打包文件，避免旧内容混入
@@ -205,7 +213,7 @@ def _run_transcribe_worker(
                 except OSError:
                     pass
         dest = job_dir / orig_name
-        if not dest.exists():
+        if dest != p and not dest.exists():
             shutil.copy2(video_path, dest)
 
         job.current_job = job_dir.name
