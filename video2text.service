@@ -10,11 +10,8 @@ User=lym
 Group=lym
 WorkingDirectory=/home/lym/projects/video2text
 
-# 启动前清理占用 7881 端口的残留进程，避免 Gradio 报端口被占用
-ExecStartPre=/usr/bin/bash -lc '/usr/bin/fuser -k 7881/tcp >/dev/null 2>&1 || true'
-
-# 使用 venv 内的 Python
-ExecStart=/home/lym/projects/video2text/.venv/bin/python fastapi_app.py --host 0.0.0.0 --port 7881 --ssl-certfile /home/lym/projects/video2text/video2text.pem --ssl-keyfile /home/lym/projects/video2text/video2text-key.pem
+# 通过 main.sh 启动，端口从 .env 的 APP_PORT 读取
+ExecStart=/home/lym/projects/video2text/main.sh auto
 
 # 崩溃后自动重启，最多 3 次（5 分钟内）
 Restart=on-failure

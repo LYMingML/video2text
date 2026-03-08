@@ -76,6 +76,24 @@ _LANG_NAME = {
 }
 
 
+def is_ollama_base_url(base_url: str | None) -> bool:
+    normalized = (base_url or "").strip().lower()
+    if not normalized:
+        return False
+    return ":11434" in normalized or "ollama" in normalized
+
+
+def _normalize_ollama_base_url(base_url: str) -> str:
+    normalized = (base_url or "").strip().rstrip("/")
+    lowered = normalized.lower()
+    for suffix in ("/v1", "/api"):
+        if lowered.endswith(suffix):
+            return normalized[:-len(suffix)].rstrip("/")
+    return normalized
+
+
+
+
 def _build_translation_prompt(source_lang: str, target_lang: str, text: str) -> str:
     lang_hint = source_lang if source_lang and source_lang != "auto" else "unknown"
     target_code = (target_lang or "zh").strip().lower() or "zh"
@@ -92,6 +110,17 @@ def _build_translation_prompt(source_lang: str, target_lang: str, text: str) -> 
     )
 
 
+
+
+def get_default_online_config() -> dict[str, str]:
+    base_url, api_key, model_name = _load_default_online_config()
+    return {
+        "base_url": base_url,
+        "api_key": api_key,
+        "model_name": model_name,
+    }
+
+
 def _model_cache_key(base_url: str, api_key: str) -> tuple[str, str]:
     # 缓存键只保存 key 前缀，避免在内存中复制完整密钥。
     return base_url, (api_key[:12] if api_key else "")
@@ -106,6 +135,26 @@ def list_available_models(
     key = (api_key if api_key is not None else _DEFAULT_API_KEY).strip()
     cache_key = _model_cache_key(base, key)
     if cache_key in _MODEL_CACHE:
+        return _MODEL_CACHE[cache_key]
+
+    if is_ollama_base_url(base):
+        ollama_base = _normalize_ollama_base_url(base)
+        req = urllib.request.Request(
+            f"{ollama_base}/api/tags",
+            headers={"Content-Type": "application/json"},
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+            obj = json.loads(raw)
+            data = obj.get("models", [])
+            _MODEL_CACHE[cache_key] = [m.get("name", "") for m in data if isinstance(m, dict) and m.get("name")]
+        except Exception as exc:
+            if raise_on_error:
+                raise RuntimeError(f"获取 Ollama 模型失败: {exc}") from exc
+            logger.warning("获取 Ollama 模型列表失败: %s", exc)
+            _MODEL_CACHE[cache_key] = []
         return _MODEL_CACHE[cache_key]
 
     if not key:
@@ -156,31 +205,71 @@ def _resolve_model_name(model_name: str, base_url: str, api_key: str) -> str:
     return wanted
 
 
-def _translate_line_with_siliconflow(
-    text: str,
-    source_lang: str,
-    target_lang: str,
+def _stream_chat_completion(
+    system_prompt: str,
+    user_prompt: str,
     model_name: str,
     base_url: str,
     api_key: str,
+    temperature: float = 0.1,
+    top_p: float = 0.9,
 ) -> str:
-    cache_key = (base_url, model_name, text)
-    if cache_key in _LINE_CACHE:
-        return _LINE_CACHE[cache_key]
+    if is_ollama_base_url(base_url):
+        payload = {
+            "model": model_name,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "stream": True,
+            "options": {
+                "temperature": temperature,
+                "top_p": top_p,
+            },
+        }
 
-    if not api_key:
-        raise RuntimeError("ONLINE_MODEL_PROFILE 的 API_KEY 为空，请在“配置模型”页设置")
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            f"{_normalize_ollama_base_url(base_url)}/api/chat",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
 
-    prompt = _build_translation_prompt(source_lang, target_lang, text)
+        chunks: list[str] = []
+        try:
+            with urllib.request.urlopen(req, timeout=180) as resp:
+                for raw_line in resp:
+                    line = raw_line.decode("utf-8", errors="ignore").strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+                    message = obj.get("message", {}) if isinstance(obj, dict) else {}
+                    token = message.get("content", "") if isinstance(message, dict) else ""
+                    if isinstance(token, str) and token:
+                        chunks.append(token)
+        except urllib.error.HTTPError as exc:
+            body = ""
+            try:
+                body = exc.read().decode("utf-8", errors="replace")
+            except Exception:
+                body = str(exc)
+            raise RuntimeError(f"HTTP {exc.code}: {body}") from exc
+
+        return "".join(chunks).strip()
+
     payload = {
         "model": model_name,
         "messages": [
-            {"role": "system", "content": "你是专业翻译助手。"},
-            {"role": "user", "content": prompt},
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
         ],
         "stream": True,
-        "temperature": 0.1,
-        "top_p": 0.9,
+        "temperature": temperature,
+        "top_p": top_p,
     }
 
     data = json.dumps(payload).encode("utf-8")
@@ -225,13 +314,42 @@ def _translate_line_with_siliconflow(
             body = str(exc)
         raise RuntimeError(f"HTTP {exc.code}: {body}") from exc
 
-    translated = "".join(chunks).strip()
+    return "".join(chunks).strip()
+
+
+def _translate_line_with_siliconflow(
+    text: str,
+    source_lang: str,
+    target_lang: str,
+    model_name: str,
+    base_url: str,
+    api_key: str,
+) -> str:
+    cache_key = (base_url, model_name, text)
+    if cache_key in _LINE_CACHE:
+        return _LINE_CACHE[cache_key]
+
+    if not api_key:
+        raise RuntimeError("ONLINE_MODEL_PROFILE 的 API_KEY 为空，请在“配置模型”页设置")
+
+    prompt = _build_translation_prompt(source_lang, target_lang, text)
+    translated = _stream_chat_completion(
+        system_prompt="你是专业翻译助手。",
+        user_prompt=prompt,
+        model_name=model_name,
+        base_url=base_url,
+        api_key=api_key,
+        temperature=0.1,
+        top_p=0.9,
+    )
     _LINE_CACHE[cache_key] = translated
     return translated
 
 
 def _normalize_line(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
+
+
 
 
 def _translate_segments_with_siliconflow(

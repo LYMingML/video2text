@@ -17,6 +17,7 @@ import shutil
 import zipfile
 import logging
 import argparse
+import subprocess
 import tempfile
 import time
 import threading
@@ -52,6 +53,9 @@ logger = logging.getLogger("video2text")
 # ---------------------------------------------------------------------------
 WORKSPACE_DIR = Path(__file__).parent / "workspace"
 WORKSPACE_DIR.mkdir(exist_ok=True)
+TEMP_VIDEO_DIR = WORKSPACE_DIR / "temp_video"
+TEMP_VIDEO_DIR.mkdir(exist_ok=True)
+TEMP_VIDEO_KEEP_COUNT = 10
 
 STOP_EVENT = threading.Event()
 
@@ -64,10 +68,21 @@ def _dir_size_bytes(dir_path: Path) -> int:
     return total
 
 
-def _list_job_folders(max_items: int = 200) -> list[str]:
-    job_dirs = [d for d in WORKSPACE_DIR.iterdir() if d.is_dir()]
+def _is_temp_video_dir(path: Path) -> bool:
+    try:
+        return path.resolve() == TEMP_VIDEO_DIR.resolve()
+    except OSError:
+        return False
+
+
+def _iter_workspace_job_dirs() -> list[Path]:
+    job_dirs = [d for d in WORKSPACE_DIR.iterdir() if d.is_dir() and not _is_temp_video_dir(d)]
     job_dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return [d.name for d in job_dirs[:max_items]]
+    return job_dirs
+
+
+def _list_job_folders(max_items: int = 200) -> list[str]:
+    return [d.name for d in _iter_workspace_job_dirs()[:max_items]]
 
 
 def _folder_dropdown_update(current: str | None = None):
@@ -81,11 +96,10 @@ def _folder_dropdown_update(current: str | None = None):
 
 def _workspace_history_markdown(max_jobs: int = 30) -> str:
     """生成 workspace 历史文件夹大小概览（仅目录大小）。"""
-    job_dirs = [d for d in WORKSPACE_DIR.iterdir() if d.is_dir()]
+    job_dirs = _iter_workspace_job_dirs()
     if not job_dirs:
         return "### 📂 历史上传\n暂无历史记录。上传后会显示在这里。"
 
-    job_dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     job_dirs = job_dirs[:max_jobs]
 
     lines = ["### 📂 历史上传", ""]
@@ -100,6 +114,14 @@ def _delete_job_folder(folder_name: str | None):
     if not folder_name:
         return (
             "⚠️ 请先选择要删除的文件夹",
+            _workspace_history_markdown(),
+            _history_dropdown_update(None),
+            _folder_dropdown_update(None),
+        )
+
+    if folder_name == TEMP_VIDEO_DIR.name:
+        return (
+            "❌ temp_video 为系统保留目录，拒绝删除",
             _workspace_history_markdown(),
             _history_dropdown_update(None),
             _folder_dropdown_update(None),
@@ -245,6 +267,27 @@ def _pick_funasr_model_for_language(
     return model
 
 
+def _has_nvidia_gpu() -> bool:
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if visible in {"", "-1", "none", "None"}:
+        return False
+
+    if os.path.exists("/dev/nvidiactl") or os.path.exists("/proc/driver/nvidia"):
+        return True
+
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "-L"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # 支持的视频/音频扩展名
 # ---------------------------------------------------------------------------
@@ -259,24 +302,137 @@ VIDEO_EXTS = {
 
 
 _ALL_MEDIA_EXTS = {ext.lower() for ext in SUPPORTED_EXTS}
+_AUDIO_EXTS = _ALL_MEDIA_EXTS - VIDEO_EXTS
+_SOURCE_MEDIA_EXTS = {ext for ext in _ALL_MEDIA_EXTS if ext != ".wav"}
+
+
+def _is_supported_media_path(path_like: str | Path) -> bool:
+    return Path(path_like).suffix.lower() in _ALL_MEDIA_EXTS
+
+
+def _safe_media_name(filename: str) -> str:
+    raw_name = Path(filename or "media").name
+    stem = re.sub(r'[/\\\x00]', '', Path(raw_name).stem).strip()[:120] or "media"
+    suffix = Path(raw_name).suffix[:20]
+    return f"{stem}{suffix}"
+
+
+def _unique_file_path(dir_path: Path, filename: str) -> Path:
+    candidate = dir_path / _safe_media_name(filename)
+    if not candidate.exists():
+        return candidate
+
+    stem = candidate.stem
+    suffix = candidate.suffix
+    index = 2
+    while True:
+        alt = dir_path / f"{stem}_{index}{suffix}"
+        if not alt.exists():
+            return alt
+        index += 1
+
+
+def _prune_temp_video_dir(max_items: int = TEMP_VIDEO_KEEP_COUNT):
+    files = [p for p in TEMP_VIDEO_DIR.iterdir() if p.is_file()]
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    for old in files[max_items:]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
+
+def _stage_source_media_to_temp_video(input_path: str, preferred_name: str | None = None) -> str:
+    src = Path(input_path)
+    ext = src.suffix.lower()
+    if ext not in _SOURCE_MEDIA_EXTS:
+        return str(src)
+
+    TEMP_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+    if src.exists() and _is_temp_video_dir(src.parent):
+        try:
+            src.touch()
+        except OSError:
+            pass
+        _prune_temp_video_dir()
+        return str(src)
+
+    target = _unique_file_path(TEMP_VIDEO_DIR, preferred_name or src.name)
+    if src.exists():
+        try:
+            if src.resolve().is_relative_to(WORKSPACE_DIR.resolve()):
+                shutil.move(str(src), str(target))
+            else:
+                shutil.copy2(src, target)
+        except AttributeError:
+            src_resolved = src.resolve()
+            workspace_resolved = WORKSPACE_DIR.resolve()
+            if workspace_resolved in src_resolved.parents:
+                shutil.move(str(src), str(target))
+            else:
+                shutil.copy2(src, target)
+    _prune_temp_video_dir()
+    return str(target)
+
+
+def _cleanup_job_source_media(job_dir: Path):
+    for entry in job_dir.iterdir():
+        if not entry.is_file():
+            continue
+        if entry.suffix.lower() not in _SOURCE_MEDIA_EXTS:
+            continue
+        try:
+            entry.unlink()
+        except OSError:
+            pass
+
+
+def _resolve_job_dir_for_input(input_path: str) -> Path:
+    src = Path(input_path)
+    if src.exists() and src.suffix.lower() == ".wav":
+        try:
+            if src.resolve().is_relative_to(WORKSPACE_DIR.resolve()) and not _is_temp_video_dir(src.parent):
+                return src.parent
+        except AttributeError:
+            src_resolved = src.resolve()
+            workspace_resolved = WORKSPACE_DIR.resolve()
+            if workspace_resolved in src_resolved.parents and not _is_temp_video_dir(src.parent):
+                return src.parent
+    return _make_job_dir(input_path)
 
 
 def _list_uploaded_videos(max_items: int = 200) -> list[str]:
     """列出 workspace 中历史上传的视频/音频文件（相对路径）。"""
-    results: list[tuple[float, str]] = []
-    for job_dir in WORKSPACE_DIR.iterdir():
-        if not job_dir.is_dir():
-            continue
+    results: list[tuple[int, float, str]] = []
+    workspace_root = WORKSPACE_DIR.parent
+    for job_dir in _iter_workspace_job_dirs():
         for f in job_dir.iterdir():
-            if not f.is_file():
+            if not f.is_file() or f.suffix.lower() != ".wav":
                 continue
-            if f.suffix.lower() not in _ALL_MEDIA_EXTS:
-                continue
-            rel = f.relative_to(Path(__file__).parent).as_posix()
-            results.append((f.stat().st_mtime, rel))
+            rel = f.relative_to(workspace_root).as_posix()
+            results.append((0, f.stat().st_mtime, rel))
 
-    results.sort(key=lambda x: x[0], reverse=True)
-    return [item[1] for item in results[:max_items]]
+    if TEMP_VIDEO_DIR.exists():
+        for f in TEMP_VIDEO_DIR.iterdir():
+            if not f.is_file() or f.suffix.lower() not in _SOURCE_MEDIA_EXTS:
+                continue
+            ext = f.suffix.lower()
+            rel = f.relative_to(workspace_root).as_posix()
+            media_rank = 1 if ext in _AUDIO_EXTS else 2
+            results.append((media_rank, f.stat().st_mtime, rel))
+
+    results.sort(key=lambda item: (item[0], -item[1], item[2]))
+    deduped: list[str] = []
+    seen_stems: set[str] = set()
+    for _rank, _mtime, rel in results:
+        stem_key = Path(rel).stem.lower()
+        if stem_key in seen_stems:
+            continue
+        seen_stems.add(stem_key)
+        deduped.append(rel)
+        if len(deduped) >= max_items:
+            break
+    return deduped
 
 
 def _resolve_input_path(video_file, history_video: str | None) -> str | None:
@@ -502,13 +658,26 @@ def _parse_srt_segments(srt_path: Path) -> list[tuple[float, float, str]]:
     return segments
 
 
+OUTPUT_LANG_SUFFIXES = {"zh", "en", "ja", "ko", "es", "fr", "de", "ru"}
+
+
+def _is_final_output_file(filename: str, file_prefix: str) -> bool:
+    allowed = {
+        f"{file_prefix}.srt",
+        f"{file_prefix}.txt",
+    }
+    for lang in OUTPUT_LANG_SUFFIXES:
+        allowed.add(f"{file_prefix}.{lang}.srt")
+        allowed.add(f"{file_prefix}.{lang}.txt")
+    return filename in allowed
+
+
 def _build_all_bundle(job_dir: Path, file_prefix: str) -> str:
-    """将 job_dir 下属于 prefix 的所有 .srt/.txt 文件打包为单个 zip。"""
+    """将 job_dir 下属于 prefix 的最终输出 .srt/.txt 文件打包为单个 zip。"""
     files = sorted(
         p for p in job_dir.iterdir()
         if p.is_file()
-        and p.suffix.lower() in {".srt", ".txt"}
-        and p.stem.startswith(file_prefix)
+        and _is_final_output_file(p.name, file_prefix)
     )
     if not files:
         raise FileNotFoundError(f"未找到可打包的 srt/txt 文件（prefix={file_prefix}）")
@@ -517,6 +686,22 @@ def _build_all_bundle(job_dir: Path, file_prefix: str) -> str:
         for f in files:
             zf.write(f, arcname=f.name)
     return str(bundle_path)
+
+
+def _finalize_plain_text_outputs(
+    job_dir: Path,
+    file_prefix: str,
+    cleaned_segments: list[tuple[float, float, str]],
+    plain_text: str,
+) -> tuple[str, str, list[str]]:
+    raw_text = plain_text or segments_to_plain(cleaned_segments, normalize=False)
+
+    raw_txt_path = save_plain(
+        cleaned_segments,
+        str(job_dir / f"{file_prefix}.txt"),
+        normalize=False,
+    )
+    return raw_text, raw_text, [Path(raw_txt_path).name]
 
 
 def _resolve_current_job(current_job: str | None, history_video: str | None) -> Path | None:
@@ -544,10 +729,12 @@ def _resolve_file_prefix(job_dir: Path, current_prefix: str | None) -> str | Non
     if meta.get("file_prefix"):
         return str(meta["file_prefix"])
 
-    for candidate in sorted(job_dir.glob("*.orig.srt")):
-        return candidate.name[:-9]  # strip '.orig.srt'
     for candidate in sorted(job_dir.glob("*.srt")):
-        return candidate.stem
+        parts = candidate.name.split(".")
+        if len(parts) == 2:
+            return candidate.stem
+        if len(parts) == 3 and parts[1] not in OUTPUT_LANG_SUFFIXES:
+            return candidate.stem
     return None
 
 
@@ -608,10 +795,7 @@ def translate_current_job(
         )
         return
 
-    orig_srt = job_dir / f"{file_prefix}.orig.srt"
-    if not orig_srt.exists():
-        fallback_srt = job_dir / f"{file_prefix}.srt"
-        orig_srt = fallback_srt if fallback_srt.exists() else orig_srt
+    orig_srt = job_dir / f"{file_prefix}.srt"
 
     segments = _parse_srt_segments(orig_srt)
     if not segments:
@@ -755,11 +939,32 @@ def _do_transcribe_stream(
             h, m = divmod(m, 60)
             return f"{h:02d}:{m:02d}:{s:02d}"
 
-        # 1. 提取音频到 job 目录
-        if log_cb:
-            log_cb("[STEP] 正在使用 ffmpeg 提取 WAV 文件（16kHz/单声道）...")
-        yield "⏳ 正在使用 ffmpeg 提取 WAV 文件...", []
-        extract_audio(video_path, audio_path)
+        input_media = Path(video_path)
+        target_audio = Path(audio_path)
+        reuse_existing_wav = False
+        try:
+            reuse_existing_wav = (
+                input_media.suffix.lower() == ".wav"
+                and input_media.exists()
+                and input_media.resolve() == target_audio.resolve()
+            )
+        except OSError:
+            reuse_existing_wav = input_media.suffix.lower() == ".wav" and str(input_media) == str(target_audio)
+
+        # 1. 提取音频到 job 目录；若输入本身就是目标 WAV，则直接复用。
+        if reuse_existing_wav:
+            if log_cb:
+                log_cb("[STEP] 输入已是当前任务的 WAV 文件，直接复用，无需再次提取...")
+            yield "⏳ 复用现有 WAV 文件...", []
+        else:
+            if log_cb:
+                log_cb("[STEP] 正在使用 ffmpeg 提取 WAV 文件（16kHz/单声道）...")
+            yield "⏳ 正在使用 ffmpeg 提取 WAV 文件...", []
+            extract_audio(video_path, audio_path)
+        staged_source_path = _stage_source_media_to_temp_video(video_path)
+        if log_cb and Path(staged_source_path).suffix.lower() in _SOURCE_MEDIA_EXTS:
+            log_cb(f"[MEDIA] 原始媒体已归档到 workspace/temp_video/{Path(staged_source_path).name}")
+        _cleanup_job_source_media(job_dir)
 
         if log_cb:
             log_cb("[STEP] 正在使用 ffprobe 读取音频时长...")
@@ -799,6 +1004,11 @@ def _do_transcribe_stream(
         if log_cb:
             log_cb(f"[CHUNK] 分片数: {total_chunks}，粒度: {chunk_seconds}s")
         yield f"⏳ 音频准备完成，共 {total_chunks} 个分片，开始识别...", []
+
+        if device == "CUDA" and not _has_nvidia_gpu():
+            if log_cb:
+                log_cb("[DEVICE] 未检测到可用 NVIDIA GPU，强制回退 CPU")
+            device = "CPU"
 
         if backend == "FunASR（Paraformer）":
             effective_model = funasr_model.split(" ")[0].strip()
@@ -1009,18 +1219,14 @@ def process(
         push_log("[STEP] 初始化...")
         lang_code = _parse_lang_code(language)
 
-        # 创建 job 目录，复制原始文件进去
-        job_dir = _make_job_dir(video_path)
+        # 任务目录只保留 wav / srt / txt / zip，不保留原始视频。
+        video_path = _stage_source_media_to_temp_video(video_path)
+        job_dir = _resolve_job_dir_for_input(video_path)
+        _cleanup_job_source_media(job_dir)
         orig_name = Path(video_path).name
         file_prefix = Path(orig_name).stem
         push_log(f"[INPUT] {orig_name}")
         push_log(f"[JOB] workspace/{job_dir.name}")
-        dest = job_dir / orig_name
-        if not dest.exists():
-            shutil.copy2(video_path, dest)
-            push_log(f"[COPY] 已复制原始文件到 {dest.name}")
-        else:
-            push_log(f"[COPY] 复用已存在原始文件 {dest.name}")
         logger.info(f"Job 目录: {job_dir}")
 
         yield (
@@ -1109,22 +1315,19 @@ def process(
         push_log("[STEP] 正在写出原文 SRT/TXT 文件...")
         orig_srt_path = save_srt(
             cleaned_segments,
-            str(job_dir / f"{file_prefix}.orig.srt"),
+            str(job_dir / f"{file_prefix}.srt"),
             normalize=False,
         )
-        orig_txt_path = save_plain(
+        _, display_plain_text, written_text_files = _finalize_plain_text_outputs(
+            job_dir,
+            file_prefix,
             cleaned_segments,
-            str(job_dir / f"{file_prefix}.orig.txt"),
-            normalize=False,
+            plain_text,
         )
         push_log(f"[OUT] 原文 SRT: {Path(orig_srt_path).name}")
-        push_log(f"[OUT] 原文 TXT: {Path(orig_txt_path).name}")
+        for written_name in written_text_files:
+            push_log(f"[OUT] 文本文件: {written_name}")
 
-        # 保留兼容旧文件名
-        save_srt(cleaned_segments, str(job_dir / f"{file_prefix}.srt"), normalize=False)
-        save_plain(cleaned_segments, str(job_dir / f"{file_prefix}.txt"), normalize=False)
-
-        display_plain_text = plain_text
         status = (
             f"✅ 原文识别完成 → workspace/{job_dir.name}/ "
             "（点击“翻译”按钮生成中文字幕与中文文本）"

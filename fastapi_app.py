@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import base64
 import json
+import io
 import re
 import shutil
 import subprocess
@@ -15,12 +17,12 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 
 import main as core
-from utils.online_models import delete_profile, load_profiles, save_profiles, upsert_profile
+from utils.online_models import delete_profile, load_app_settings, load_profiles, save_app_settings, save_profiles, upsert_profile
 from utils.subtitle import collect_plain_text, normalize_segments_timeline, save_plain, save_srt, segments_to_plain
-from utils.translate import list_available_models, translate_segments
+from utils.translate import is_ollama_base_url, list_available_models, translate_segments
 
 app = FastAPI(title="video2text-fastapi")
 
@@ -51,6 +53,138 @@ class JobState:
 _RUNTIME_LOCK = threading.Lock()
 _RUNTIME_JOB: JobState | None = None
 _RUNTIME_THREAD: threading.Thread | None = None
+
+SUBTITLE_PRIORITY_PRESETS: dict[str, str] = {
+    "zh": "zh-Hans,zh-CN,zh,zh.*,yue,zh-HK,en,en.*",
+    "none": "",
+    "en": "en,en.*,en-US,en-GB",
+    "ja": "ja,ja.*",
+    "ko": "ko,ko.*",
+    "es": "es,es.*",
+    "fr": "fr,fr.*",
+    "de": "de,de.*",
+    "ru": "ru,ru.*",
+    "pt": "pt,pt.*",
+    "ar": "ar,ar.*",
+    "hi": "hi,hi.*",
+}
+
+
+def _normalize_subtitle_priority(value: str) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return "zh"
+    lowered = raw.lower()
+    if lowered in {"none", "__none__"}:
+        return "none"
+    if lowered in SUBTITLE_PRIORITY_PRESETS:
+        return lowered
+
+    # 兼容旧格式：若传入的是完整的 --sub-langs 字符串，尽量推断主选项。
+    if "zh-hans" in lowered or "zh-cn" in lowered or lowered.startswith("zh"):
+        return "zh"
+    if lowered.startswith("en"):
+        return "en"
+    for key in ("ja", "ko", "es", "fr", "de", "ru", "pt", "ar", "hi"):
+        if lowered.startswith(key):
+            return key
+    return "zh"
+
+
+def _decode_media_base64_to_temp(media_base64: str, filename: str) -> str:
+    raw = (media_base64 or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="media_base64 不能为空")
+
+    # 支持 data URI: data:video/mp4;base64,xxx
+    if "," in raw and raw.lower().startswith("data:"):
+        raw = raw.split(",", 1)[1].strip()
+
+    try:
+        binary = base64.b64decode(raw, validate=True)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="media_base64 非法") from exc
+
+    if not binary:
+        raise HTTPException(status_code=400, detail="media_base64 解码后为空")
+
+    name = Path(filename or "media.mp4").name
+    if not core._is_supported_media_path(name):
+        raise HTTPException(status_code=400, detail="filename 扩展名不受支持")
+
+    core.TEMP_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+    save_path = core._unique_file_path(core.TEMP_VIDEO_DIR, name)
+    save_path.write_bytes(binary)
+    core._prune_temp_video_dir()
+    return str(save_path)
+
+
+def _collect_job_outputs(job: JobState) -> tuple[Path, list[str]]:
+    if not job.current_job:
+        raise HTTPException(status_code=500, detail="任务未生成输出目录")
+
+    job_dir = core.WORKSPACE_DIR / job.current_job
+    if not job_dir.exists() or not job_dir.is_dir():
+        raise HTTPException(status_code=500, detail="输出目录不存在")
+
+    file_prefix = core._resolve_file_prefix(job_dir, job.current_prefix)
+    if not file_prefix:
+        raise HTTPException(status_code=500, detail="无法解析输出文件前缀")
+
+    zip_path = Path(job.zip_bundle) if job.zip_bundle else None
+    if not zip_path or not zip_path.exists():
+        zip_path = Path(_build_all_bundle(job_dir, file_prefix))
+        job.zip_bundle = str(zip_path)
+
+    files = [
+        p.name
+        for p in sorted(job_dir.iterdir(), key=lambda x: x.name.lower())
+        if p.is_file() and (
+            _is_final_output_file(p.name, file_prefix)
+            or p.suffix.lower() == ".zip"
+        )
+    ]
+    return zip_path, files
+
+
+def _resolve_external_input(payload: dict[str, Any], auto_subtitle_lang: str) -> tuple[str, str | None]:
+    source_type = str(payload.get("source_type", "")).strip().lower() or "url"
+    subtitle_path: str | None = None
+
+    if source_type == "base64":
+        filename = str(payload.get("filename", "media.mp4")).strip() or "media.mp4"
+        media_base64 = str(payload.get("media_base64", ""))
+        return _decode_media_base64_to_temp(media_base64, filename), None
+
+    if source_type == "history":
+        history_video = str(payload.get("history_video", "")).strip()
+        media_path = core._resolve_input_path(None, history_video) or ""
+        if not media_path:
+            raise HTTPException(status_code=400, detail="history_video 无效")
+        media = Path(media_path)
+        if not media.exists() or not media.is_file():
+            raise HTTPException(status_code=400, detail="history_video 对应文件不存在")
+        if not core._is_supported_media_path(media_path):
+            raise HTTPException(status_code=400, detail="history_video 不是受支持媒体类型")
+        return media_path, None
+
+    if source_type == "url":
+        url = str(payload.get("url", "")).strip()
+        if not url:
+            raise HTTPException(status_code=400, detail="url 不能为空")
+        dl = api_download_url({"url": url, "auto_subtitle_lang": auto_subtitle_lang})
+        filepath = str(dl.get("filepath", "")).strip()
+        if not filepath:
+            raise HTTPException(status_code=500, detail="URL 下载未返回文件路径")
+        media_path = core._resolve_input_path(None, filepath) or ""
+        if not media_path:
+            raise HTTPException(status_code=500, detail="URL 下载后的媒体文件无效")
+        if dl.get("auto_subtitle") and dl.get("subtitle_path"):
+            subtitle_abs = Path(__file__).resolve().parent / str(dl.get("subtitle_path"))
+            subtitle_path = str(subtitle_abs.resolve())
+        return media_path, subtitle_path
+
+    raise HTTPException(status_code=400, detail="source_type 仅支持: base64/url/history")
 
 
 def _get_job(job_id: str) -> JobState:
@@ -194,15 +328,9 @@ def _run_transcribe_worker(
         if not p.exists():
             raise RuntimeError(f"输入文件不存在: {video_path}")
 
-        # 若文件已在 workspace 子目录内（上传/下载场景），直接复用其所在目录，
-        # 避免 _make_job_dir 的 slug 逻辑生成不同名字的冗余目录。
-        _ws_resolved = core.WORKSPACE_DIR.resolve()
-        try:
-            p.resolve().relative_to(_ws_resolved)
-            job_dir = p.parent
-            job_dir.mkdir(parents=True, exist_ok=True)
-        except ValueError:
-            job_dir = core._make_job_dir(video_path)
+        # 统一由核心逻辑决定任务目录，确保 job_dir 在后续流程中始终已初始化。
+        job_dir = core._resolve_job_dir_for_input(video_path)
+        job_dir.mkdir(parents=True, exist_ok=True)
         orig_name = p.name
         file_prefix = p.stem
         # 清理本目录之前生成的全部文本/字幕/打包文件，避免旧内容混入
@@ -212,9 +340,7 @@ def _run_transcribe_worker(
                     old.unlink()
                 except OSError:
                     pass
-        dest = job_dir / orig_name
-        if dest != p and not dest.exists():
-            shutil.copy2(video_path, dest)
+        core._cleanup_job_source_media(job_dir)
 
         job.current_job = job_dir.name
         job.current_prefix = file_prefix
@@ -261,10 +387,17 @@ def _run_transcribe_worker(
             },
         )
 
-        save_srt(cleaned_segments, str(job_dir / f"{file_prefix}.orig.srt"), normalize=False)
-        save_plain(cleaned_segments, str(job_dir / f"{file_prefix}.orig.txt"), normalize=False)
+        plain_text = plain_text or segments_to_plain(cleaned_segments, normalize=False)
         save_srt(cleaned_segments, str(job_dir / f"{file_prefix}.srt"), normalize=False)
-        save_plain(cleaned_segments, str(job_dir / f"{file_prefix}.txt"), normalize=False)
+
+        _, display_plain_text, written_text_files = core._finalize_plain_text_outputs(
+            job_dir,
+            file_prefix,
+            cleaned_segments,
+            plain_text,
+        )
+        for written_name in written_text_files:
+            job.add_log(f"[OUT] 文本文件: {written_name}")
         try:
             job.zip_bundle = _build_all_bundle(job_dir, file_prefix)
         except Exception:
@@ -278,7 +411,7 @@ def _run_transcribe_worker(
             eta_seconds=0,
             step_label="识别完成",
         )
-        job.plain_text = plain_text or segments_to_plain(cleaned_segments, normalize=False)
+        job.plain_text = display_plain_text
         job.done = True
         job.running = False
     except Exception as exc:
@@ -296,13 +429,23 @@ def _normalize_lang_code(lang: str) -> str:
     return code
 
 
+def _is_final_output_file(filename: str, file_prefix: str) -> bool:
+    allowed = {
+        f"{file_prefix}.srt",
+        f"{file_prefix}.txt",
+    }
+    for lang in {"zh", "en", "ja", "ko", "es", "fr", "de", "ru"}:
+        allowed.add(f"{file_prefix}.{lang}.srt")
+        allowed.add(f"{file_prefix}.{lang}.txt")
+    return filename in allowed
+
+
 def _build_all_bundle(job_dir: Path, file_prefix: str) -> str:
-    """将 job_dir 下所有属于该 prefix 的 .srt/.txt 文件打包为单个 zip。"""
+    """将 job_dir 下所有属于该 prefix 的最终输出 .srt/.txt 文件打包为单个 zip。"""
     files = sorted(
         p for p in job_dir.iterdir()
         if p.is_file()
-        and p.suffix.lower() in {".srt", ".txt"}
-        and p.stem.startswith(file_prefix)
+        and _is_final_output_file(p.name, file_prefix)
     )
     if not files:
         raise FileNotFoundError(f"未找到可打包的 srt/txt 文件（prefix={file_prefix}）")
@@ -311,6 +454,163 @@ def _build_all_bundle(job_dir: Path, file_prefix: str) -> str:
         for f in files:
             zf.write(f, arcname=f.name)
     return str(bundle_path)
+
+
+def _pick_downloaded_subtitle(media_path: Path) -> Path | None:
+    """优先挑选与媒体同 stem 的自动字幕，偏好中文/粤语，其次英文。"""
+    if not media_path.exists():
+        return None
+
+    parent = media_path.parent
+    stem = media_path.stem
+    candidates: list[Path] = []
+    for ext in (".srt", ".vtt"):
+        candidates.extend(sorted(parent.glob(f"{stem}*.{ext.lstrip('.')}")))
+
+    if not candidates:
+        return None
+
+    preferred = [
+        "zh-hans", "zh-cn", "zh", "zh-hant", "yue", "en", "eng",
+    ]
+
+    def _score(path: Path) -> tuple[int, str]:
+        name = path.name.lower()
+        lang = ""
+        prefix = f"{stem}.".lower()
+        if name.startswith(prefix):
+            lang = name[len(prefix):]
+            if lang.endswith(path.suffix.lower()):
+                lang = lang[: -len(path.suffix)]
+            lang = lang.strip(".")
+        for idx, key in enumerate(preferred):
+            if key in lang:
+                return (idx, name)
+        return (len(preferred), name)
+
+    candidates.sort(key=_score)
+    return candidates[0]
+
+
+def _parse_webvtt_segments(vtt_path: Path) -> list[tuple[float, float, str]]:
+    """简化版 WebVTT 解析，仅提取时间轴与文本。"""
+    if not vtt_path.exists():
+        return []
+
+    text = vtt_path.read_text(encoding="utf-8", errors="ignore")
+    blocks = re.split(r"\n\s*\n", text.strip())
+    segments: list[tuple[float, float, str]] = []
+
+    def _to_seconds(ts: str) -> float:
+        t = ts.strip().replace(",", ".")
+        parts = t.split(":")
+        if len(parts) == 3:
+            h, m, s = parts
+            return int(h) * 3600 + int(m) * 60 + float(s)
+        if len(parts) == 2:
+            m, s = parts
+            return int(m) * 60 + float(s)
+        return float(parts[0])
+
+    for block in blocks:
+        lines = [ln.rstrip("\ufeff").strip() for ln in block.splitlines() if ln.strip()]
+        if not lines:
+            continue
+        if lines[0].upper() == "WEBVTT":
+            continue
+
+        ts_index = next((i for i, ln in enumerate(lines) if "-->" in ln), -1)
+        if ts_index < 0:
+            continue
+        ts_line = lines[ts_index]
+        start_s, end_s = [x.strip() for x in ts_line.split("-->", maxsplit=1)]
+        try:
+            s = _to_seconds(start_s)
+            e = _to_seconds(end_s.split(" ", 1)[0])
+        except Exception:
+            continue
+
+        content = "\n".join(lines[ts_index + 1:]).strip()
+        if not content:
+            continue
+        segments.append((s, e, content))
+
+    return segments
+
+
+def _run_subtitle_import_worker(job: JobState, media_path: str, subtitle_path: str):
+    t0 = time.time()
+    try:
+        media = Path(media_path)
+        subtitle = Path(subtitle_path)
+        if not media.exists():
+            raise RuntimeError(f"媒体文件不存在: {media_path}")
+        if not subtitle.exists():
+            raise RuntimeError(f"字幕文件不存在: {subtitle_path}")
+
+        job_dir = core._resolve_job_dir_for_input(str(media))
+        job_dir.mkdir(parents=True, exist_ok=True)
+        file_prefix = media.stem
+
+        for old in list(job_dir.iterdir()):
+            if old.is_file() and old.suffix.lower() in {".srt", ".txt", ".zip"}:
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+
+        target_srt = job_dir / f"{file_prefix}.srt"
+        ext = subtitle.suffix.lower()
+        if ext == ".srt":
+            shutil.copy2(subtitle, target_srt)
+            segments = core._parse_srt_segments(target_srt)
+        elif ext == ".vtt":
+            segments = _parse_webvtt_segments(subtitle)
+            save_srt(segments, str(target_srt), normalize=True)
+        else:
+            raise RuntimeError(f"不支持的字幕格式: {subtitle.suffix}")
+
+        cleaned_segments = normalize_segments_timeline(segments)
+        if not cleaned_segments:
+            raise RuntimeError("自动字幕为空或解析失败")
+
+        plain_text = collect_plain_text(cleaned_segments)
+        save_plain(cleaned_segments, str(job_dir / f"{file_prefix}.txt"), normalize=False)
+
+        lang_code = "auto"
+        source_lang = core._guess_source_lang(lang_code, plain_text)
+        core._save_task_meta(
+            job_dir,
+            {
+                "file_prefix": file_prefix,
+                "lang_code": lang_code,
+                "source_lang": source_lang,
+                "is_non_zh": source_lang != "zh",
+            },
+        )
+
+        job.current_job = job_dir.name
+        job.current_prefix = file_prefix
+        job.plain_text = plain_text
+        job.zip_bundle = _build_all_bundle(job_dir, file_prefix)
+        job.add_log(f"[INPUT] 自动字幕: {subtitle.name}")
+        job.add_log(f"[JOB] workspace/{job_dir.name}")
+        _set_job_progress(
+            job,
+            f"✅ 已使用平台自动字幕（跳过语音识别）：workspace/{job_dir.name}/",
+            t0,
+            progress_pct=100,
+            eta_seconds=0,
+            step_label="自动字幕完成",
+        )
+        job.done = True
+        job.running = False
+    except Exception as exc:
+        job.failed = True
+        job.done = True
+        job.running = False
+        _set_job_progress(job, f"❌ 自动字幕导入失败: {exc}", t0, progress_pct=0, eta_seconds=0, step_label="导入失败")
+        job.add_log(f"[ERROR] {exc}")
 
 
 def _run_translate_worker(job: JobState, profile_name: str, model_name: str, target_lang: str):
@@ -324,10 +624,7 @@ def _run_translate_worker(job: JobState, profile_name: str, model_name: str, tar
         if not file_prefix:
             raise RuntimeError("未找到原文字幕")
 
-        orig_srt = job_dir / f"{file_prefix}.orig.srt"
-        if not orig_srt.exists():
-            fallback = job_dir / f"{file_prefix}.srt"
-            orig_srt = fallback if fallback.exists() else orig_srt
+        orig_srt = job_dir / f"{file_prefix}.srt"
 
         segments = core._parse_srt_segments(orig_srt)
         if not segments:
@@ -411,6 +708,11 @@ def health():
 
 @app.get("/")
 def index():
+    app_settings = load_app_settings()
+    default_backend = app_settings["DEFAULT_BACKEND"]
+    default_funasr_model = app_settings["DEFAULT_FUNASR_MODEL"]
+    default_whisper_model = app_settings["DEFAULT_WHISPER_MODEL"]
+    default_auto_subtitle_lang = app_settings["AUTO_SUBTITLE_LANG"]
     html = """
 <!doctype html>
 <html lang="zh-CN">
@@ -660,6 +962,44 @@ button:hover{transform:translateY(-1px);background:#ecfaf4}
 .drag-item[draggable="true"]{cursor:grab}
 .drag-item.dragging{opacity:.35;outline:2px dashed var(--accent)}
 .drag-item.drag-over{outline:2px dashed var(--accent);outline-offset:2px}
+.home-action-bar{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    flex-wrap:wrap;
+}
+.home-action-bar .action-spacer{
+    flex:1;
+    min-width:16px;
+}
+.home-action-bar .subtitle-lang-input{
+    width:auto;
+    min-width:fit-content;
+    max-width:100%;
+    flex:0 0 auto;
+}
+.home-action-bar .subtitle-lang-label{
+    font-size:12px;
+    color:var(--text-1);
+    white-space:nowrap;
+}
+.inline-toggle{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    min-height:40px;
+    padding:0 10px;
+    border:1px solid #cfe0d6;
+    border-radius:10px;
+    background:#fbfffd;
+    color:#355646;
+    font-size:13px;
+    font-weight:600;
+    white-space:nowrap;
+}
+.inline-toggle input{
+    margin:0;
+}
 </style>
 </head>
 <body>
@@ -683,22 +1023,44 @@ button:hover{transform:translateY(-1px);background:#ecfaf4}
         <section class="workspace">
             <article class="card panel-left stack">
                 <h3>任务输入与操作</h3>
-                <p class="muted">上传新视频，或复用历史视频，按步骤执行转录与翻译。</p>
+                <p class="muted">上传新视频，或使用当前视频，按步骤执行转录与翻译。</p>
                 <div class="drag-zone" id="dz-home-input">
                     <div class="drag-row">
-                        <div class="drag-item toolbar tight" draggable="true" style="flex:none">
+                        <div class="drag-item toolbar tight home-action-bar" draggable="true" style="flex:1">
                             <button onclick="startTranscribe()">开始转录</button>
                             <button class="btn-danger" onclick="stopJob()">停止</button>
                             <button onclick="startTranslate()">翻译</button>
+                            <button onclick="downloadOutputZip()">下载输出文件</button>
+                            <span class="subtitle-lang-label">默认字幕优先级（仅下载URL）</span>
+                            <select
+                                id="autoSubtitleLangs"
+                                class="subtitle-lang-input"
+                                title="用于在线视频下载时的自动字幕语言优先级"
+                                onchange="onAutoSubtitleLangChanged()"
+                            >
+                                <option value="zh">简体中文</option>
+                                <option value="none">无</option>
+                                <option value="en">英语</option>
+                                <option value="ja">日语</option>
+                                <option value="ko">韩语</option>
+                                <option value="es">西班牙语</option>
+                                <option value="fr">法语</option>
+                                <option value="de">德语</option>
+                                <option value="ru">俄语</option>
+                                <option value="pt">葡萄牙语</option>
+                                <option value="ar">阿拉伯语</option>
+                                <option value="hi">印地语</option>
+                            </select>
+                            <span class="action-spacer"></span>
                         </div>
                     </div>
                     <div class="drag-row">
                         <div class="drag-item field" draggable="true">
                             <label for="videoFile">上传视频/音频</label>
-                            <input type="file" id="videoFile" />
+                            <input type="file" id="videoFile" accept="video/*,audio/*,.mp4,.mkv,.avi,.mov,.wmv,.flv,.webm,.m4v,.ts,.mp3,.wav,.flac,.m4a,.aac,.ogg" />
                         </div>
                         <div class="drag-item field" draggable="true">
-                            <label for="historyVideo">历史视频</label>
+                            <label for="historyVideo">当前视频</label>
                             <select id="historyVideo"></select>
                         </div>
                         <div class="drag-item field" draggable="true">
@@ -751,11 +1113,6 @@ button:hover{transform:translateY(-1px);background:#ecfaf4}
                             <select id="homeModelSel"></select>
                         </div>
                     </div>
-                    <div class="drag-row">
-                        <div class="drag-item toolbar tight" draggable="true" style="flex:none">
-                            <button onclick="downloadOutputZip()">下载输出文件</button>
-                        </div>
-                    </div>
                 </div>
                 <div id="homeSelectionState" class="selection-hint">当前已选：未选择后端模型与翻译模型</div>
             </article>
@@ -777,8 +1134,7 @@ button:hover{transform:translateY(-1px);background:#ecfaf4}
                         <div class="summary-kv"><b>识别后端</b><span id="homeSummaryBackend">未选择</span></div>
                         <div class="summary-kv"><b>后端模型</b><span id="homeSummaryBackendModel">未选择</span></div>
                         <div class="summary-kv"><b>翻译模型</b><span id="homeSummaryTranslate">未选择</span></div>
-                        <div class="summary-kv"><b>历史文件夹</b><span id="homeSummaryFolder">未选择</span></div>
-                        <div class="summary-kv"><b>历史文本</b><span id="homeSummaryText">未选择</span></div>
+                        <div class="summary-kv"><b>当前文件</b><span id="homeSummaryFile">未选择</span></div>
                     </section>
                 </div>
                 <div class="field" style="flex:1;display:flex;flex-direction:column;min-height:0">
@@ -816,7 +1172,7 @@ button:hover{transform:translateY(-1px);background:#ecfaf4}
 
             <article class="card panel-right stack">
                 <h3>下载历史文本</h3>
-                <p class="muted">选中文件夹后，可浏览并下载其中的 `.txt` 文件。</p>
+                <p class="muted">选中文件夹后，可浏览其中的 `.txt` 文件，并将全部文本打包下载为 ZIP。</p>
                 <div class="field compact">
                     <label for="textFileSearch">搜索历史文本</label>
                     <input id="textFileSearch" placeholder="输入关键字筛选文本文件" oninput="applyTextFileFilter()" />
@@ -829,7 +1185,7 @@ button:hover{transform:translateY(-1px);background:#ecfaf4}
                 </div>
                 <div class="toolbar">
                     <button onclick="refreshTextFiles()">刷新文本列表</button>
-                    <button onclick="downloadTextFile()">下载选中文本</button>
+                    <button onclick="downloadTextFile()">下载全部文本 ZIP</button>
                 </div>
             </article>
         </section>
@@ -861,6 +1217,7 @@ button:hover{transform:translateY(-1px);background:#ecfaf4}
                     <label for="modelStatus">测试与保存状态</label>
                     <input id="modelStatus" class="status" readonly />
                 </div>
+                <input id="profileOriginalName" type="hidden" value="" />
                 <div class="params-grid-3">
                     <div class="field compact">
                         <label for="backendSel">识别后端</label>
@@ -950,6 +1307,13 @@ button:hover{transform:translateY(-1px);background:#ecfaf4}
 </div>
 
 <script>
+const APP_DEFAULTS = {
+    backend: __APP_DEFAULT_BACKEND__,
+    funasrModel: __APP_DEFAULT_FUNASR_MODEL__,
+    whisperModel: __APP_DEFAULT_WHISPER_MODEL__,
+    autoSubtitleLang: __APP_DEFAULT_AUTO_SUBTITLE_LANG__
+};
+
 let currentJobId = "";
 let pollTimer = null;
 let foldersList = [];
@@ -958,6 +1322,7 @@ let profileNamesList = [];
 let folderFilterKeyword = '';
 let textFileFilterKeyword = '';
 let profileFilterKeyword = '';
+let lastSavedAutoSubtitleLang = APP_DEFAULTS.autoSubtitleLang;
 const HOME_FUNASR_MODELS = [
     {value:'paraformer-zh', name:'paraformer-zh', feature:'普通话精度推荐'},
     {value:'paraformer', name:'paraformer', feature:'普通话全量'},
@@ -1033,6 +1398,38 @@ function setHiddenSelectOptions(selectId, values, preferred=''){
     }
     select.value = '';
     return '';
+}
+
+function normalizeSubtitlePriority(value){
+    const raw = String(value || '').trim();
+    if(!raw){ return 'zh'; }
+    const v = raw.toLowerCase();
+    if(v === 'none' || v === '__none__'){ return 'none'; }
+    if(v === 'zh' || v.startsWith('zh-') || raw.includes('zh-Hans') || raw.includes('zh-CN')){ return 'zh'; }
+    if(v === 'en' || raw.includes('en-US') || raw.includes('en-GB')){ return 'en'; }
+    const shortlist = ['ja','ko','es','fr','de','ru','pt','ar','hi'];
+    if(shortlist.includes(v)){ return v; }
+    return 'zh';
+}
+
+async function onAutoSubtitleLangChanged(){
+    const sel = document.getElementById('autoSubtitleLangs');
+    if(!sel) return;
+    const value = normalizeSubtitlePriority(sel.value);
+    if(value === lastSavedAutoSubtitleLang){
+        return;
+    }
+    try{
+        await api('/api/app-settings/subtitle-priority', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({auto_subtitle_lang: value})
+        });
+        lastSavedAutoSubtitleLang = value;
+        APP_DEFAULTS.autoSubtitleLang = value;
+    }catch(e){
+        console.error(e);
+    }
 }
 
 function renderIconGrid(containerId, items, selectedValue, onPick, keyword){
@@ -1120,12 +1517,77 @@ function applyProfileFilter(){
 }
 
 function newProfile(){
-    document.getElementById('profileName').value = '';
-    document.getElementById('baseUrl').value = '';
-    document.getElementById('apiKey').value = '';
-    setSearchableModelOptions('modelSearch', 'modelSel', [], '');
-    document.getElementById('modelStatus').value = '';
+    createNewProfileFromCurrent().catch(e=>{
+        document.getElementById('modelStatus').value = `❌ 新建失败: ${e.message}`;
+    });
+}
+
+function normalizeProfileName(name){
+    return String(name || '').trim();
+}
+
+function getUniqueProfileName(baseName, excludeName=''){
+    const base = normalizeProfileName(baseName) || '新配置';
+    const exclude = normalizeProfileName(excludeName);
+    const existing = new Set((profileNamesList || []).map(v=>normalizeProfileName(v)).filter(Boolean));
+    if(!existing.has(base) || base === exclude){
+        return base;
+    }
+    let idx = 2;
+    while(true){
+        const candidate = `${base}${idx}`;
+        if(!existing.has(candidate) || candidate === exclude){
+            return candidate;
+        }
+        idx += 1;
+    }
+}
+
+function getAllModelOptions(selectId){
+    const select = document.getElementById(selectId);
+    if(!select) return [];
+    try{
+        const all = JSON.parse(select.dataset.allModels || '[]');
+        if(Array.isArray(all) && all.length){
+            return sortModelNames(all);
+        }
+    }catch(_e){
+        // ignore invalid cache
+    }
+    return sortModelNames(Array.from(select.options).map(opt=>opt.value));
+}
+
+function buildProfilePayload(overrideName=''){
+    const originalName = normalizeProfileName(document.getElementById('profileOriginalName')?.value || '');
+    const name = normalizeProfileName(overrideName || document.getElementById('profileName').value);
+    return {
+        original_name: originalName,
+        name,
+        base_url: document.getElementById('baseUrl').value || '',
+        api_key: document.getElementById('apiKey').value || '',
+        default_model: document.getElementById('modelSel').value || '',
+        models: getAllModelOptions('modelSel'),
+    };
+}
+
+async function createNewProfileFromCurrent(){
+    const newName = getUniqueProfileName('新配置');
+    const payload = buildProfilePayload(newName);
+    payload.original_name = '';
+    const data = await api('/api/model/profiles/save', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(payload)
+    });
+    document.getElementById('modelStatus').value = data.message || `✅ 已新增配置: ${newName}`;
+    await loadProfiles();
+    const select = document.getElementById('profileSel');
+    if(select){
+        select.value = newName;
+    }
+    await onProfileSelected();
     document.getElementById('profileName').focus();
+    document.getElementById('profileName').select();
 }
 
 function selectFolder(folderName){
@@ -1201,6 +1663,10 @@ function syncSelectionStates(){
     const homeModel = document.getElementById('homeModelSel')?.value || '';
     const profile = document.getElementById('profileSel')?.value || '';
     const model = document.getElementById('modelSel')?.value || '';
+    const uploadedFile = document.getElementById('videoFile')?.files?.[0]?.name || '';
+    const historyVideo = document.getElementById('historyVideo')?.value || '';
+    const currentVideo = uploadedFile || historyVideo;
+    const currentFile = currentVideo ? currentVideo.replace(/^.*[\\/]/, '') : '';
     const folder = document.getElementById('folderSelect')?.value || '';
     const textFile = document.getElementById('textFileSelect')?.value || '';
 
@@ -1216,14 +1682,13 @@ function syncSelectionStates(){
     setSelectionState('homeSummaryBackend', backend || '未选择');
     setSelectionState('homeSummaryBackendModel', backendModel || '未选择');
     setSelectionState('homeSummaryTranslate', homeModel || '未选择');
-    setSelectionState('homeSummaryFolder', folder || '未选择');
-    setSelectionState('homeSummaryText', textFile || '未选择');
+    setSelectionState('homeSummaryFile', currentFile || '未选择');
 
-    ['homeBackendSel','homeBackendModelSel','homeModelSel','modelSel','profileSel','folderSelect','textFileSelect'].forEach(updateSelectionClass);
+    ['homeBackendSel','homeBackendModelSel','homeModelSel','modelSel','profileSel','folderSelect','textFileSelect','historyVideo'].forEach(updateSelectionClass);
 }
 
 function bindSelectionListeners(){
-    const ids = ['homeBackendSel','homeBackendModelSel','homeModelSel','modelSel','profileSel','folderSelect','textFileSelect'];
+    const ids = ['homeBackendSel','homeBackendModelSel','homeModelSel','modelSel','profileSel','folderSelect','textFileSelect','historyVideo','videoFile'];
     ids.forEach(id=>{
         const el = document.getElementById(id);
         if(!el || el.dataset.selectionBound === '1') return;
@@ -1234,7 +1699,7 @@ function bindSelectionListeners(){
 }
 
 function getBackendModelCatalog(){
-    const backend = document.getElementById('homeBackendSel')?.value || 'FunASR（Paraformer）';
+    const backend = document.getElementById('homeBackendSel')?.value || APP_DEFAULTS.backend;
     return backend === 'faster-whisper（多语言）' ? HOME_WHISPER_MODELS : HOME_FUNASR_MODELS;
 }
 
@@ -1422,11 +1887,42 @@ async function api(url, opts={}){
   return await r.json();
 }
 
-async function refreshHistory(){
+async function refreshHistory(preferredValue=''){
   const data = await api('/api/history');
   const hv = document.getElementById('historyVideo');
+  const oldValue = hv.value;
   hv.innerHTML = '';
   (data.videos||[]).forEach(v=>{ const o=document.createElement('option'); o.value=v; o.textContent=v; hv.appendChild(o); });
+        const values = Array.from(hv.options).map(opt => opt.value);
+        const historyStem = (value='')=>{
+            const parts = String(value || '').split('/');
+            const fileName = parts[parts.length - 1] || '';
+            const dot = fileName.lastIndexOf('.');
+            return (dot > 0 ? fileName.slice(0, dot) : fileName).toLowerCase();
+        };
+        const isAudioHistoryValue = (value='')=>{
+            const lower = String(value || '').toLowerCase();
+            return !['.mp4','.mkv','.avi','.mov','.wmv','.flv','.webm','.m4v','.ts'].some(ext => lower.endsWith(ext));
+        };
+        const findSameStemAudio = (value='')=>{
+            const stem = historyStem(value);
+            if(!stem){ return ''; }
+            return values.find(v => isAudioHistoryValue(v) && historyStem(v) === stem) || '';
+        };
+        const wavValue = values.find(v => v.toLowerCase().endsWith('.wav')) || '';
+        if(preferredValue && values.includes(preferredValue)){
+            hv.value = preferredValue;
+        }else if(preferredValue && findSameStemAudio(preferredValue)){
+            hv.value = findSameStemAudio(preferredValue);
+        }else if(oldValue && values.includes(oldValue)){
+            hv.value = oldValue;
+        }else if(oldValue && findSameStemAudio(oldValue)){
+            hv.value = findSameStemAudio(oldValue);
+        }else if(wavValue){
+            hv.value = wavValue;
+        }else if(values.length){
+            hv.value = values[0];
+        }
         foldersList = data.folders || [];
         setHiddenSelectOptions('folderSelect', foldersList, document.getElementById('folderSelect')?.value || '');
         applyFolderFilter();
@@ -1474,12 +1970,11 @@ async function refreshTextFiles(){
 
 function downloadTextFile(){
     const folder = document.getElementById('folderSelect').value;
-    const file = document.getElementById('textFileSelect').value;
-    if(!folder || !file){
-                alert('请先选择文件夹和文本文件');
+    if(!folder){
+                alert('请先选择文件夹');
         return;
     }
-    const url = '/api/folders/download-text?folder_name='+encodeURIComponent(folder)+'&file_name='+encodeURIComponent(file);
+    const url = '/api/folders/download-text?folder_name='+encodeURIComponent(folder);
     window.open(url, '_blank');
 }
 
@@ -1488,10 +1983,36 @@ async function loadProfiles(){
     profileNamesList = data.profile_names || [];
     setHiddenSelectOptions('profileSel', profileNamesList, data.active || profileNamesList[0] || '');
     applyProfileFilter();
+    applyAppSettings(data.app_settings || APP_DEFAULTS);
   fillProfile(data.active_profile || {});
 }
 
+function applyAppSettings(settings){
+        const merged = {
+                backend: settings?.DEFAULT_BACKEND || settings?.backend || APP_DEFAULTS.backend,
+                funasrModel: settings?.DEFAULT_FUNASR_MODEL || settings?.funasrModel || APP_DEFAULTS.funasrModel,
+                whisperModel: settings?.DEFAULT_WHISPER_MODEL || settings?.whisperModel || APP_DEFAULTS.whisperModel,
+        autoSubtitleLang: normalizeSubtitlePriority(settings?.AUTO_SUBTITLE_LANG || settings?.autoSubtitleLang || settings?.AUTO_SUBTITLE_LANGS || settings?.autoSubtitleLangs || APP_DEFAULTS.autoSubtitleLang),
+        };
+        const backendSel = document.getElementById('backendSel');
+        const homeBackendSel = document.getElementById('homeBackendSel');
+        const funasrSel = document.getElementById('funasrModel');
+        const whisperSel = document.getElementById('whisperModel');
+    const autoSubtitleLangs = document.getElementById('autoSubtitleLangs');
+        if(backendSel){ backendSel.value = merged.backend; }
+        if(homeBackendSel){ homeBackendSel.value = merged.backend; }
+        if(funasrSel){ funasrSel.value = merged.funasrModel; }
+        if(whisperSel){ whisperSel.value = merged.whisperModel; }
+        if(autoSubtitleLangs){
+            const hasValue = Array.from(autoSubtitleLangs.options).some(opt => opt.value === merged.autoSubtitleLang);
+            autoSubtitleLangs.value = hasValue ? merged.autoSubtitleLang : APP_DEFAULTS.autoSubtitleLang;
+            lastSavedAutoSubtitleLang = autoSubtitleLangs.value;
+        }
+        onHomeBackendChange(merged.backend === 'faster-whisper（多语言）' ? merged.whisperModel : merged.funasrModel);
+}
+
 function fillProfile(p){
+    document.getElementById('profileOriginalName').value = p.name || '';
   document.getElementById('profileName').value = p.name || '';
   document.getElementById('baseUrl').value = p.base_url || '';
   document.getElementById('apiKey').value = p.api_key || '';
@@ -1516,7 +2037,12 @@ async function onProfileSelected(){
 }
 
 async function fetchModels(){
-  const payload = {name: document.getElementById('profileName').value, base_url: document.getElementById('baseUrl').value, api_key: document.getElementById('apiKey').value};
+    const payload = {
+                original_name: normalizeProfileName(document.getElementById('profileOriginalName')?.value || ''),
+                name: document.getElementById('profileName').value,
+                base_url: document.getElementById('baseUrl').value,
+                api_key: document.getElementById('apiKey').value
+    };
     try{
         const data = await api('/api/model/profiles/fetch-models', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
         const models = sortModelNames(data.models||[]);
@@ -1535,10 +2061,23 @@ async function fetchModels(){
 }
 
 async function saveProfile(){
-  const payload = {name: document.getElementById('profileName').value, base_url: document.getElementById('baseUrl').value, api_key: document.getElementById('apiKey').value, default_model: document.getElementById('modelSel').value};
+    const payload = buildProfilePayload();
+    if(!payload.name){
+        document.getElementById('modelStatus').value = '❌ 配置名称不能为空';
+        return;
+    }
+    payload.default_backend = document.getElementById('backendSel').value || APP_DEFAULTS.backend;
+    payload.default_funasr_model = document.getElementById('funasrModel').value || APP_DEFAULTS.funasrModel;
+    payload.default_whisper_model = document.getElementById('whisperModel').value || APP_DEFAULTS.whisperModel;
+        payload.auto_subtitle_lang = document.getElementById('autoSubtitleLangs')?.value || APP_DEFAULTS.autoSubtitleLang;
   const data = await api('/api/model/profiles/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
   document.getElementById('modelStatus').value = data.message || '';
   await loadProfiles();
+        const select = document.getElementById('profileSel');
+        if(select){
+                select.value = payload.name;
+        }
+        await onProfileSelected();
     syncSelectionStates();
 }
 
@@ -1600,10 +2139,11 @@ async function downloadVideoUrl(){
   btn.textContent = '下载中…';
   document.getElementById('statusText').value = '⏳ 正在下载视频…';
   try{
+        const subtitleLang = document.getElementById('autoSubtitleLangs')?.value || APP_DEFAULTS.autoSubtitleLang;
     const r = await fetch('/api/download_url',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({url})
+            body: JSON.stringify({url, auto_subtitle_lang: subtitleLang})
     });
     if(r.status===401){
       const d = await r.json().catch(()=>({}));
@@ -1629,9 +2169,23 @@ async function downloadVideoUrl(){
       }
     }
     if(typeof syncSelectionStates==='function') syncSelectionStates();
-    // 自动开始转录
-    document.getElementById('statusText').value = '⏳ 下载完成，正在启动转录…';
-    await startTranscribe();
+        if(data.auto_subtitle && data.subtitle_path){
+            document.getElementById('statusText').value = '⏳ 检测到平台自动字幕，正在导入…';
+            const imported = await api('/api/jobs/import-subtitle', {
+                method:'POST',
+                headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({
+                    history_video: data.filepath || '',
+                    subtitle_path: data.subtitle_path || ''
+                })
+            });
+            currentJobId = imported.job_id;
+            startPoll();
+            return;
+        }
+        // 未命中自动字幕时，按原流程启动转录
+        document.getElementById('statusText').value = '⏳ 下载完成，正在启动转录…';
+        await startTranscribe();
   }catch(e){
     alert('❌ '+e.message);
     document.getElementById('statusText').value = '❌ 下载失败';
@@ -1673,21 +2227,25 @@ async function startTranslate(){
 }
 
 function startPoll(){
-  if(pollTimer) clearInterval(pollTimer);
-  pollTimer = setInterval(async ()=>{
-    if(!currentJobId) return;
-    try{
-      const data = await api('/api/jobs/'+currentJobId);
-      document.getElementById('statusText').value = data.status || '';
-      document.getElementById('plainText').value = data.plain_text || '';
-      document.getElementById('logText').value = data.log_text || '';
-    updateTaskPanel(data);
+    if(pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(async ()=>{
+        if(!currentJobId) return;
+        try{
+            const data = await api('/api/jobs/'+currentJobId);
+            document.getElementById('statusText').value = data.status || '';
+            document.getElementById('plainText').value = data.plain_text || '';
+            document.getElementById('logText').value = data.log_text || '';
+            updateTaskPanel(data);
             if(data.done && !data.running){
+                const preferredWav = (data.current_job && data.current_prefix)
+                    ? `workspace/${data.current_job}/${data.current_prefix}.wav`
+                    : '';
+                await refreshHistory(preferredWav);
                 clearInterval(pollTimer);
                 pollTimer = null;
             }
-    }catch(e){ console.error(e); }
-  }, 1000);
+        }catch(e){ console.error(e); }
+    }, 1000);
 }
 
 function initDragZones() {
@@ -1738,7 +2296,6 @@ function initDragZones() {
 (async function init(){
   await refreshHistory();
   await loadProfiles();
-    onHomeBackendChange('paraformer-zh');
     bindSelectionListeners();
     syncSelectionStates();
         updateTaskPanel({});
@@ -1748,6 +2305,10 @@ function initDragZones() {
 </body>
 </html>
 """
+    html = html.replace("__APP_DEFAULT_BACKEND__", json.dumps(default_backend, ensure_ascii=False))
+    html = html.replace("__APP_DEFAULT_FUNASR_MODEL__", json.dumps(default_funasr_model, ensure_ascii=False))
+    html = html.replace("__APP_DEFAULT_WHISPER_MODEL__", json.dumps(default_whisper_model, ensure_ascii=False))
+    html = html.replace("__APP_DEFAULT_AUTO_SUBTITLE_LANG__", json.dumps(default_auto_subtitle_lang, ensure_ascii=False))
     return HTMLResponse(content=html)
 
 
@@ -1788,22 +2349,27 @@ def api_folder_text_files(folder_name: str):
 
 
 @app.get("/api/folders/download-text")
-def api_download_text_file(folder_name: str, file_name: str):
+def api_download_text_file(folder_name: str):
     folder = _resolve_workspace_folder(folder_name)
-    filename = (file_name or "").strip()
-    if not filename or Path(filename).name != filename or not filename.lower().endswith(".txt"):
-        raise HTTPException(status_code=400, detail="invalid file_name")
+    text_files = sorted(p for p in folder.glob("*.txt") if p.is_file())
+    if not text_files:
+        raise HTTPException(status_code=404, detail="text files not found")
 
-    target = (folder / filename).resolve()
-    if folder.resolve() not in target.parents or not target.exists() or not target.is_file():
-        raise HTTPException(status_code=404, detail="text file not found")
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for text_file in text_files:
+            zf.write(text_file, arcname=text_file.name)
+    buffer.seek(0)
 
-    return FileResponse(str(target), filename=target.name)
+    zip_name = f"{folder.name}.texts.zip"
+    headers = {"Content-Disposition": f'attachment; filename="{zip_name}"'}
+    return StreamingResponse(buffer, media_type="application/zip", headers=headers)
 
 
 @app.get("/api/model/profiles")
 def api_profiles():
     profiles, active = load_profiles()
+    app_settings = load_app_settings()
     active_profile = next((p for p in profiles if p.get("name") == active), profiles[0] if profiles else {})
     if isinstance(active_profile, dict):
         active_profile = dict(active_profile)
@@ -1815,6 +2381,7 @@ def api_profiles():
         "profile_names": [p.get("name", "") for p in profiles if p.get("name")],
         "active": active,
         "active_profile": active_profile,
+        "app_settings": app_settings,
     }
 
 
@@ -1835,10 +2402,13 @@ def api_profile(name: str):
 @app.post("/api/model/profiles/fetch-models")
 def api_fetch_models(payload: dict[str, str]):
     name = payload.get("name", "").strip()
+    original_name = payload.get("original_name", "").strip()
     base_url = payload.get("base_url", "").strip()
     api_key = payload.get("api_key", "").strip()
-    if not name or not base_url or not api_key:
-        raise HTTPException(status_code=400, detail="name/base_url/api_key required")
+    if not name or not base_url:
+        raise HTTPException(status_code=400, detail="name/base_url required")
+    if not api_key and not is_ollama_base_url(base_url):
+        raise HTTPException(status_code=400, detail="api_key required for non-Ollama profiles")
 
     try:
         models = list_available_models(base_url, api_key, raise_on_error=True)
@@ -1850,6 +2420,10 @@ def api_fetch_models(payload: dict[str, str]):
 
     models = sorted({str(m).strip() for m in models if str(m).strip()}, key=lambda x: x.lower())
     profiles, _ = load_profiles()
+    if any(str(p.get("name", "")).strip() == name for p in profiles) and original_name != name:
+        raise HTTPException(status_code=409, detail="配置名重复，请使用其他名称")
+    if original_name and original_name != name:
+        profiles = delete_profile(profiles, original_name)
     profile: dict[str, Any] = next((p for p in profiles if p.get("name") == name), {"name": name})
     profile["base_url"] = base_url
     profile["api_key"] = api_key
@@ -1867,20 +2441,33 @@ def api_fetch_models(payload: dict[str, str]):
 
 
 @app.post("/api/model/profiles/save")
-def api_save_profile(payload: dict[str, str]):
+def api_save_profile(payload: dict[str, Any]):
     name = payload.get("name", "").strip()
+    original_name = str(payload.get("original_name", "")).strip()
     if not name:
         raise HTTPException(status_code=400, detail="name required")
 
     profiles, _ = load_profiles()
+    if any(str(p.get("name", "")).strip() == name for p in profiles) and original_name != name:
+        raise HTTPException(status_code=409, detail="配置名重复，请使用其他名称")
+    if original_name and original_name != name:
+        profiles = delete_profile(profiles, original_name)
+
     profile = next((p for p in profiles if p.get("name") == name), {"name": name, "models": []})
     profile["base_url"] = payload.get("base_url", "").strip()
     profile["api_key"] = payload.get("api_key", "").strip()
     profile["default_model"] = payload.get("default_model", "").strip()
-    profile["models"] = sorted(
-        {str(m).strip() for m in profile.get("models", []) if str(m).strip()},
-        key=lambda x: x.lower(),
-    )
+    payload_models = payload.get("models", [])
+    if isinstance(payload_models, list):
+        profile["models"] = sorted(
+            {str(m).strip() for m in payload_models if str(m).strip()},
+            key=lambda x: x.lower(),
+        )
+    else:
+        profile["models"] = sorted(
+            {str(m).strip() for m in profile.get("models", []) if str(m).strip()},
+            key=lambda x: x.lower(),
+        )
     if profile["default_model"] and profile["default_model"] not in profile.get("models", []):
         profile["models"] = [profile["default_model"], *profile.get("models", [])]
         profile["models"] = sorted(
@@ -1890,7 +2477,24 @@ def api_save_profile(payload: dict[str, str]):
 
     profiles = upsert_profile(profiles, profile)
     save_profiles(profiles, active_profile=name)
-    return {"message": "✅ 配置已保存"}
+    save_app_settings(
+        {
+            "DEFAULT_BACKEND": str(payload.get("default_backend", "")).strip(),
+            "DEFAULT_FUNASR_MODEL": str(payload.get("default_funasr_model", "")).strip(),
+            "DEFAULT_WHISPER_MODEL": str(payload.get("default_whisper_model", "")).strip(),
+            "AUTO_SUBTITLE_LANG": _normalize_subtitle_priority(str(
+                payload.get("auto_subtitle_lang", payload.get("auto_subtitle_langs", ""))
+            ).strip()),
+        }
+    )
+    return {"message": "✅ 配置已保存", "active": name}
+
+
+@app.post("/api/app-settings/subtitle-priority")
+def api_save_subtitle_priority(payload: dict[str, str]):
+    value = _normalize_subtitle_priority(str(payload.get("auto_subtitle_lang", "")).strip() or "zh")
+    save_app_settings({"AUTO_SUBTITLE_LANG": value})
+    return {"message": "ok", "AUTO_SUBTITLE_LANG": value}
 
 
 @app.post("/api/model/profiles/delete")
@@ -1926,6 +2530,15 @@ def api_download_url(payload: dict):
     if not url:
         raise HTTPException(status_code=400, detail="URL 不能为空")
 
+    app_settings = load_app_settings()
+    subtitle_priority = _normalize_subtitle_priority(
+        str(payload.get("auto_subtitle_lang", "")).strip()
+        or str(payload.get("auto_subtitle_langs", "")).strip()
+        or app_settings["AUTO_SUBTITLE_LANG"]
+    )
+    sub_langs = SUBTITLE_PRIORITY_PRESETS.get(subtitle_priority, SUBTITLE_PRIORITY_PRESETS["zh"])
+    disable_auto_subs = subtitle_priority == "none"
+
     ytdlp_bin = _find_ytdlp()
     if not Path(ytdlp_bin).is_file() and not shutil.which(ytdlp_bin):
         raise HTTPException(status_code=500, detail="yt-dlp 未安装，请运行: pip install yt-dlp")
@@ -1954,11 +2567,21 @@ def api_download_url(payload: dict):
         return None
 
     def _download(dest_dir: Path, cookie_extra: list[str]) -> tuple[int, str, str]:
-        output_tmpl = str(dest_dir / "%(title).200B.%(ext)s")
-        cmd = [ytdlp_bin, "--no-playlist",
-               "-f", "bestaudio[ext=m4a]/bestaudio/best",
-               "--no-mtime", "-o", output_tmpl,
-               "--print", "after_move:filepath"] + cookie_extra + [url]
+        output_tmpl = str(dest_dir)
+        cmd = [ytdlp_bin, "--no-playlist", "-f", "bestaudio[ext=m4a]/bestaudio/best"]
+        if not disable_auto_subs:
+            cmd.extend([
+                "--write-auto-subs",
+                "--sub-langs", sub_langs,
+                "--sub-format", "srt/best",
+                "--convert-subs", "srt",
+            ])
+        cmd.extend([
+            "--no-mtime",
+            "-o", output_tmpl,
+            "--print", "after_move:filepath",
+        ])
+        cmd = cmd + cookie_extra + [url]
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         return r.returncode, r.stdout, r.stderr
 
@@ -1967,10 +2590,9 @@ def api_download_url(payload: dict):
         return lines[-1] if lines else ""
 
     def _title_to_dir(title: str) -> Path:
-        safe = re.sub(r'[/\x00]', '', title).strip()[:20] or "media"
-        d = Path(core.WORKSPACE_DIR) / safe
-        d.mkdir(parents=True, exist_ok=True)
-        return d
+        safe = re.sub(r'[/\x00]', '', title).strip()[:120] or "media"
+        core.TEMP_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+        return core.TEMP_VIDEO_DIR / f"{safe}.%(id)s.%(ext)s"
 
     # 尝试顺序：各浏览器 cookie → 无 cookie
     browser_attempts: list[str | None] = ["chrome", "chromium", "firefox", "edge", None]
@@ -1996,8 +2618,18 @@ def api_download_url(payload: dict):
         if rc == 0:
             fp = _extract_path(out)
             if fp and Path(fp).exists():
-                return {"filepath": Path(fp).relative_to(project_root).as_posix(),
-                        "filename": Path(fp).name}
+                core._prune_temp_video_dir()
+                media_path = Path(fp)
+                subtitle_path = _pick_downloaded_subtitle(media_path)
+                payload = {
+                    "filepath": media_path.relative_to(project_root).as_posix(),
+                    "filename": media_path.name,
+                    "auto_subtitle": bool(subtitle_path),
+                }
+                if subtitle_path:
+                    payload["subtitle_path"] = subtitle_path.relative_to(project_root).as_posix()
+                    payload["subtitle_name"] = subtitle_path.name
+                return payload
 
         combined = out + err
         if _is_login_err(combined):
@@ -2008,17 +2640,61 @@ def api_download_url(payload: dict):
     raise HTTPException(status_code=500, detail="下载失败：无法获取视频信息，请检查 URL 或网络")
 
 
+@app.post("/api/jobs/import-subtitle")
+def api_job_import_subtitle(payload: dict[str, str]):
+    global _RUNTIME_THREAD
+
+    with _RUNTIME_LOCK:
+        if _RUNTIME_JOB and _RUNTIME_JOB.running:
+            raise HTTPException(status_code=409, detail="已有任务运行中")
+
+    history_video = (payload.get("history_video") or "").strip()
+    subtitle_path_input = (payload.get("subtitle_path") or "").strip()
+    if not history_video or not subtitle_path_input:
+        raise HTTPException(status_code=400, detail="history_video 和 subtitle_path 必填")
+
+    media_path = core._resolve_input_path(None, history_video) or ""
+    if not media_path:
+        raise HTTPException(status_code=400, detail="无效的媒体路径")
+
+    base = Path(__file__).resolve().parent
+    subtitle_path = Path(subtitle_path_input)
+    if not subtitle_path.is_absolute():
+        subtitle_path = (base / subtitle_path).resolve()
+    media = Path(media_path).resolve()
+    if not media.exists() or not media.is_file():
+        raise HTTPException(status_code=404, detail="媒体文件不存在")
+    if not subtitle_path.exists() or not subtitle_path.is_file():
+        raise HTTPException(status_code=404, detail="字幕文件不存在")
+
+    job = JobState(job_id=uuid.uuid4().hex, running=True, status="⏳ 正在导入平台自动字幕")
+    _set_job_progress(job, "⏳ 正在导入平台自动字幕", time.time(), progress_pct=10, eta_seconds=0, step_label="导入字幕")
+    _set_job_state(job)
+
+    def runner():
+        _run_subtitle_import_worker(job, str(media), str(subtitle_path))
+
+    _RUNTIME_THREAD = threading.Thread(target=runner, daemon=True)
+    _RUNTIME_THREAD.start()
+    return {"job_id": job.job_id}
+
+
 @app.post("/api/transcribe/start")
 def api_transcribe_start(
     history_video: str = Form(default=""),
-    backend: str = Form(default="FunASR（Paraformer）"),
+    backend: str = Form(default=""),
     language: str = Form(default="自动检测"),
-    whisper_model: str = Form(default="medium"),
-    funasr_model: str = Form(default="paraformer-zh ⭐ 普通话精度推荐"),
+    whisper_model: str = Form(default=""),
+    funasr_model: str = Form(default=""),
     device: str = Form(default="CUDA"),
     video_file: UploadFile | None = File(default=None),
 ):
     global _RUNTIME_THREAD
+
+    app_settings = load_app_settings()
+    backend = backend or app_settings["DEFAULT_BACKEND"]
+    whisper_model = whisper_model or app_settings["DEFAULT_WHISPER_MODEL"]
+    funasr_model = funasr_model or app_settings["DEFAULT_FUNASR_MODEL"]
 
     with _RUNTIME_LOCK:
         if _RUNTIME_JOB and _RUNTIME_JOB.running:
@@ -2028,26 +2704,37 @@ def api_transcribe_start(
     temp_path: Path | None = None
     if video_file is not None and video_file.filename:
         orig_name = Path(video_file.filename).name
-        safe_stem = re.sub(r'[/\x00]', '', Path(video_file.filename).stem).strip()[:20] or "media"
-        dest_dir = Path(core.WORKSPACE_DIR) / safe_stem
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        save_path = dest_dir / orig_name
+        if not core._is_supported_media_path(orig_name):
+            raise HTTPException(status_code=400, detail="仅支持视频或音频文件上传")
+        core.TEMP_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+        save_path = core._unique_file_path(core.TEMP_VIDEO_DIR, orig_name)
         with save_path.open("wb") as f:
             shutil.copyfileobj(video_file.file, f)
+        core._prune_temp_video_dir()
         video_path = str(save_path)
         # 文件已在正确位置，无需后续清理
     elif history_video:
         video_path = core._resolve_input_path(None, history_video) or ""
+        if video_path and not core._is_supported_media_path(video_path):
+            raise HTTPException(status_code=400, detail="当前文件不是受支持的视频或音频格式")
 
     if not video_path:
-        raise HTTPException(status_code=400, detail="请上传文件或选择历史视频")
+        raise HTTPException(status_code=400, detail="请上传文件或选择当前视频")
 
     job = JobState(job_id=uuid.uuid4().hex, running=True, status="⏳ 任务已启动")
     _set_job_progress(job, "⏳ 任务已启动", time.time(), progress_pct=1, eta_seconds=0, step_label="任务启动")
     _set_job_state(job)
 
     def runner():
-        _run_transcribe_worker(job, video_path, backend, language, whisper_model, funasr_model, device)
+        _run_transcribe_worker(
+            job,
+            video_path,
+            backend,
+            language,
+            whisper_model,
+            funasr_model,
+            device,
+        )
         if temp_path and temp_path.exists():
             try:
                 temp_path.unlink()
@@ -2123,13 +2810,13 @@ def api_job_files(job_id: str):
     if not job_dir.exists() or not job_dir.is_dir():
         return {"files": []}
 
-    canonical_zip = f"{job.current_job}.zip"
+    file_prefix = core._resolve_file_prefix(job_dir, job.current_prefix)
     files = [
         p.name
         for p in sorted(job_dir.iterdir(), key=lambda x: x.name.lower())
         if p.is_file() and (
-            p.suffix.lower() in {".srt", ".txt"}
-            or p.name == canonical_zip
+            (file_prefix and _is_final_output_file(p.name, file_prefix))
+            or p.suffix.lower() == ".zip"
         )
     ]
     return {"files": files}
@@ -2156,12 +2843,102 @@ def api_job_download_file(job_id: str, file_name: str):
     return FileResponse(str(target), filename=target.name)
 
 
+@app.post("/api/external/process")
+def api_external_process(payload: dict[str, Any]):
+    """
+    第三方统一调用入口：
+    - 输入: base64/url/history
+    - 可指定: backend/funasr_model/whisper_model/device/auto_subtitle_lang/target_lang/online_profile/online_model
+    - 输出: zip 文件（二进制）或 JSON（含 zip_base64）
+    """
+    app_settings = load_app_settings()
+
+    auto_subtitle_lang = _normalize_subtitle_priority(
+        str(payload.get("auto_subtitle_lang", "")).strip() or app_settings["AUTO_SUBTITLE_LANG"]
+    )
+    backend = str(payload.get("backend", "")).strip() or app_settings["DEFAULT_BACKEND"]
+    whisper_model = str(payload.get("whisper_model", "")).strip() or app_settings["DEFAULT_WHISPER_MODEL"]
+    funasr_model = str(payload.get("funasr_model", "")).strip() or app_settings["DEFAULT_FUNASR_MODEL"]
+    language = str(payload.get("language", "自动检测")).strip() or "自动检测"
+    device = str(payload.get("device", "CUDA")).strip() or "CUDA"
+
+    target_lang_raw = str(payload.get("target_lang", "")).strip().lower()
+    do_translate = target_lang_raw not in {"", "none", "off", "false", "no"}
+    target_lang = _normalize_lang_code(target_lang_raw or "zh")
+    profile_name = str(payload.get("online_profile", "")).strip()
+    online_model = str(payload.get("online_model", "")).strip()
+
+    output_mode = str(payload.get("output_mode", "binary")).strip().lower() or "binary"
+
+    with _RUNTIME_LOCK:
+        if _RUNTIME_JOB and _RUNTIME_JOB.running:
+            raise HTTPException(status_code=409, detail="已有任务运行中")
+
+    media_path, subtitle_path = _resolve_external_input(payload, auto_subtitle_lang)
+
+    job = JobState(job_id=uuid.uuid4().hex, running=True, status="⏳ 外部任务处理中")
+    _set_job_progress(job, "⏳ 外部任务处理中", time.time(), progress_pct=2, eta_seconds=0, step_label="任务启动")
+
+    # URL 命中自动字幕且未强制 ASR 时，直接导入字幕。
+    force_asr = bool(payload.get("force_asr", False))
+    if subtitle_path and not force_asr:
+        _run_subtitle_import_worker(job, media_path, subtitle_path)
+    else:
+        _run_transcribe_worker(
+            job,
+            media_path,
+            backend,
+            language,
+            whisper_model,
+            funasr_model,
+            device,
+        )
+
+    if job.failed:
+        raise HTTPException(status_code=500, detail=f"转录失败: {job.status}")
+
+    if do_translate:
+        job.running = True
+        job.done = False
+        job.failed = False
+        _run_translate_worker(job, profile_name, online_model, target_lang)
+        if job.failed:
+            raise HTTPException(status_code=500, detail=f"翻译失败: {job.status}")
+
+    zip_path, files = _collect_job_outputs(job)
+
+    if output_mode in {"binary", "zip", "download"}:
+        return FileResponse(str(zip_path), filename=zip_path.name, media_type="application/zip")
+
+    if output_mode in {"base64", "json-base64"}:
+        zip_b64 = base64.b64encode(zip_path.read_bytes()).decode("ascii")
+        return {
+            "job_id": job.job_id,
+            "status": job.status,
+            "current_job": job.current_job,
+            "files": files,
+            "zip_name": zip_path.name,
+            "zip_base64": zip_b64,
+        }
+
+    return {
+        "job_id": job.job_id,
+        "status": job.status,
+        "current_job": job.current_job,
+        "files": files,
+        "zip_name": zip_path.name,
+        "download_path": f"/api/jobs/{job.job_id}/download-file?file_name={zip_path.name}",
+    }
+
+
 def main():
     import argparse
     import uvicorn
 
+    app_settings = load_app_settings()
+
     parser = argparse.ArgumentParser(description="video2text FastAPI")
-    parser.add_argument("--port", type=int, default=7881)
+    parser.add_argument("--port", type=int, default=int(app_settings["APP_PORT"]))
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--ssl-certfile", default=None)
     parser.add_argument("--ssl-keyfile", default=None)

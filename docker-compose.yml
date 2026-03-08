@@ -1,0 +1,35 @@
+services:
+  video2text:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: video2text:cu121
+    container_name: video2text
+    restart: unless-stopped
+    # 如果宿主机已安装 NVIDIA Container Toolkit，可启用：
+    # gpus: all
+    ports:
+      - "7881:7881"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 7881
+      SSL_MODE: http
+      HF_HOME: /app/.cache/huggingface
+      MODELSCOPE_CACHE: /app/.cache/modelscope
+      TORCH_HOME: /app/.cache/torch
+      GRADIO_ANALYTICS_ENABLED: "false"
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
+    volumes:
+      - ./workspace:/app/workspace
+      - ./.env:/app/.env
+      - ./video2text.pem:/app/video2text.pem:ro
+      - ./video2text-key.pem:/app/video2text-key.pem:ro
+      - modelscope-cache:/app/.cache/modelscope
+      - huggingface-cache:/app/.cache/huggingface
+      - torch-cache:/app/.cache/torch
+
+volumes:
+  modelscope-cache:
+  huggingface-cache:
+  torch-cache:

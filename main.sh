@@ -4,8 +4,18 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR"
 
+read_env_value() {
+  local key="$1"
+  local env_file="$PROJECT_DIR/.env"
+  if [[ ! -f "$env_file" ]]; then
+    return 0
+  fi
+  grep -E "^${key}=" "$env_file" | tail -n 1 | cut -d'=' -f2-
+}
+
 HOST="${HOST:-0.0.0.0}"
-PORT="${PORT:-7881}"
+ENV_PORT="$(read_env_value APP_PORT || true)"
+PORT="${PORT:-${ENV_PORT:-7881}}"
 PYTHON_BIN="${PYTHON_BIN:-.venv/bin/python}"
 CERT_FILE="${CERT_FILE:-video2text.pem}"
 KEY_FILE="${KEY_FILE:-video2text-key.pem}"

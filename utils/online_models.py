@@ -8,6 +8,15 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENV_PATH = PROJECT_ROOT / ".env"
 
+APP_SETTINGS_DEFAULTS = {
+    "APP_PORT": "7881",
+    "BROWSER_DEBUG_PORT": "9222",
+    "DEFAULT_BACKEND": "FunASR（Paraformer）",
+    "DEFAULT_FUNASR_MODEL": "paraformer-zh ⭐ 普通话精度推荐",
+    "DEFAULT_WHISPER_MODEL": "medium",
+    "AUTO_SUBTITLE_LANG": "zh",
+}
+
 
 def _read_env_map() -> dict[str, str]:
     env: dict[str, str] = {}
@@ -29,6 +38,43 @@ def _read_env_map() -> dict[str, str]:
 def _write_env_map(env: dict[str, str]):
     lines = [f"{k}={v}" for k, v in sorted(env.items(), key=lambda kv: kv[0])]
     ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def load_app_settings() -> dict[str, str]:
+    env = _read_env_map()
+    settings: dict[str, str] = {}
+    for key, default_value in APP_SETTINGS_DEFAULTS.items():
+        if key == "AUTO_SUBTITLE_LANG":
+            value = str(env.get(key, "") or env.get("AUTO_SUBTITLE_LANGS", "")).strip()
+        else:
+            value = str(env.get(key, "")).strip()
+        settings[key] = value or default_value
+
+    try:
+        port = int(settings["APP_PORT"])
+        settings["APP_PORT"] = str(port if port > 0 else 7881)
+    except Exception:
+        settings["APP_PORT"] = APP_SETTINGS_DEFAULTS["APP_PORT"]
+
+    try:
+        debug_port = int(settings["BROWSER_DEBUG_PORT"])
+        settings["BROWSER_DEBUG_PORT"] = str(debug_port if debug_port > 0 else 9222)
+    except Exception:
+        settings["BROWSER_DEBUG_PORT"] = APP_SETTINGS_DEFAULTS["BROWSER_DEBUG_PORT"]
+    return settings
+
+
+def save_app_settings(settings: dict[str, str] | None = None):
+    env = _read_env_map()
+    current = load_app_settings()
+    for key in APP_SETTINGS_DEFAULTS:
+        if settings and key in settings:
+            value = str(settings.get(key, "")).strip()
+            current[key] = value or APP_SETTINGS_DEFAULTS[key]
+        env[key] = current[key]
+    # 向后兼容：新版本只保留单值 AUTO_SUBTITLE_LANG。
+    env.pop("AUTO_SUBTITLE_LANGS", None)
+    _write_env_map(env)
 
 
 def load_profiles() -> tuple[list[dict], str]:
