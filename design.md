@@ -1,5 +1,14 @@
 # video2text 设计文档
 
+**版本**: v0.2.1
+
+## 修复日志
+
+### v0.2.1
+- 修复 GPU 检测：`_has_nvidia_gpu()` 不再将未设置的 `CUDA_VISIBLE_DEVICES` 视为禁用
+- 修复 URL 下载：`refreshHistory()` 参数传递，确保相同 stem 音频文件自动回退
+- 修复 systemd：`video2text.service` 的 `StartLimitIntervalSec` 移至 `[Unit]` section
+
 ## 1. 目标
 
 提供一个可在 Linux 与局域网环境稳定运行的音视频转字幕服务，支持：

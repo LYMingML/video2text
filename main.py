@@ -269,7 +269,8 @@ def _pick_funasr_model_for_language(
 
 def _has_nvidia_gpu() -> bool:
     visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
-    if visible in {"", "-1", "none", "None"}:
+    # 空字符串表示"未设置"（应继续探测硬件），只有明确禁用值才跳过
+    if visible in {"-1", "none", "None"}:
         return False
 
     if os.path.exists("/dev/nvidiactl") or os.path.exists("/proc/driver/nvidia"):

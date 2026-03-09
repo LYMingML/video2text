@@ -1,3 +1,7 @@
+# video2text Dockerfile (v0.2.1)
+# Supports NVIDIA GPU acceleration with cu121 (Tesla P4 / Pascal / Volta compatible)
+# https://github.com/your-repo/video2text
+
 FROM python:3.12-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \

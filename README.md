@@ -2,6 +2,14 @@
 
 video2text 是一个运行在 Linux 上的 FastAPI WebUI，用于把本地或在线视频/音频转换为字幕与纯文本，并支持可选翻译。
 
+**最新版本**: v0.2.1
+
+### 最近修复（v0.2.1）
+
+- 🔧 **GPU 检测修复**：修复 `CUDA_VISIBLE_DEVICES` 未设置时无法检测 GPU 的问题
+- 🔧 **URL 下载修复**：修复下载视频后历史列表选择失败导致转录 400 错误的问题  
+- 🔧 **systemd 配置修复**：修正 `video2text.service` 的 `StartLimitIntervalSec` 位置
+
 ## 当前能力确认
 
 是的，当前项目可以从局域网直接访问，并支持解析本地与在线音视频：

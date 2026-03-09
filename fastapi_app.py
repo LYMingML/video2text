@@ -2158,16 +2158,9 @@ async function downloadVideoUrl(){
     const data = await r.json();
     document.getElementById('statusText').value = '✅ 下载完成: '+data.filename;
     document.getElementById('urlInput').value = '';
-    await refreshHistory();
-    const hv = document.getElementById('historyVideo');
-    if(data.filepath){
-      hv.value = data.filepath;
-      if(!hv.value){
-        for(const opt of hv.options){
-          if(opt.value.includes(data.filename)){ hv.value=opt.value; break; }
-        }
-      }
-    }
+    // 传入 filepath 作为 preferredValue，refreshHistory 内部会优先精确匹配，
+    // 若文件因去重被隐藏（已有同 stem 的 .wav），则自动回退到同 stem 的音频文件
+    await refreshHistory(data.filepath || '');
     if(typeof syncSelectionStates==='function') syncSelectionStates();
         if(data.auto_subtitle && data.subtitle_path){
             document.getElementById('statusText').value = '⏳ 检测到平台自动字幕，正在导入…';

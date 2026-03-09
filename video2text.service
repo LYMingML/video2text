@@ -3,21 +3,19 @@ Description=video2text WebUI - 视频转字幕服务
 Documentation=https://github.com/your-repo/video2text
 After=network.target
 Wants=network.target
+# 崩溃后自动重启，最多 3 次（5 分钟内）
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Service]
 Type=simple
-User=lym
-Group=lym
 WorkingDirectory=/home/lym/projects/video2text
 
 # 通过 main.sh 启动，端口从 .env 的 APP_PORT 读取
-ExecStart=/home/lym/projects/video2text/main.sh auto
+ExecStart=/home/lym/projects/video2text/main.sh
 
-# 崩溃后自动重启，最多 3 次（5 分钟内）
 Restart=on-failure
 RestartSec=10
-StartLimitIntervalSec=300
-StartLimitBurst=3
 
 # 环境变量
 Environment="PYTHONUNBUFFERED=1"
@@ -31,4 +29,4 @@ StandardError=journal
 SyslogIdentifier=video2text
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
