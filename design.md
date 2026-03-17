@@ -1,8 +1,17 @@
 # video2text 设计文档
 
-**版本**: v0.2.1
+**版本**: v0.2.2
 
 ## 修复日志
+
+### v0.2.2
+- Docker 拆分双镜像：新增 `Dockerfile.cpu` 与 `Dockerfile`(GPU)
+- `docker-compose.yml` 改为 profile 启动：`cpu` / `gpu`
+- 文档更新：新增双镜像构建、运行与发布规范
+- **文件去重**：上传相同内容的视频/音频时自动复用缓存，避免重复复制
+  - 使用 SQLite 数据库 (`workspace/fingerprints.db`) 存储文件指纹
+  - 指纹比较：文件大小 + 文件头50字节 + 文件尾50字节
+  - 不依赖文件名，仅比较内容
 
 ### v0.2.1
 - 修复 GPU 检测：`_has_nvidia_gpu()` 不再将未设置的 `CUDA_VISIBLE_DEVICES` 视为禁用
@@ -29,7 +38,9 @@
 - `utils/subtitle.py`：字幕清洗与 SRT/TXT 写入
 - `utils/online_models.py`：`.env` 与在线模型配置持久化
 - `main.sh`：本机启动脚本（默认 `0.0.0.0`）
-- `Dockerfile` / `docker-compose.yml`：容器部署
+- `Dockerfile.cpu`：CPU 精简镜像
+- `Dockerfile`：GPU cu121 镜像
+- `docker-compose.yml`：双 profile（`cpu` / `gpu`）编排
 
 ## 3. 关键能力
 
@@ -69,17 +80,22 @@
 
 ### 5.1 镜像
 
-- 基础镜像：`python:3.12-slim-bookworm`
-- 内置 ffmpeg 与 Python 依赖
+- CPU 镜像：`video2text:cpu`
+	- `Dockerfile.cpu`
+	- 不安装 CUDA runtime 依赖，优先减小体积
+- GPU 镜像：`video2text:cu121`
+	- `Dockerfile`
+	- 安装 `torch==2.3.1+cu121` / `torchaudio==2.3.1+cu121`
+- 两个镜像均基于 `python:3.12-slim-bookworm`
 - 默认暴露端口：`7881`
 - 入口：`docker-entrypoint.sh`
 
 ### 5.2 compose
 
-- 服务名：`video2text`
-- 端口映射：`7881:7881`
+- 服务：`video2text-cpu`（profile=`cpu`）、`video2text-gpu`（profile=`gpu`）
+- 端口映射：`7881:7881`（同一时刻只启动一个 profile）
 - 挂载：`workspace/`、`.env`、模型缓存卷
-- 支持 CPU/GPU 一体部署（GPU 需宿主机额外准备）
+- GPU 服务固定 `gpus: all`，要求宿主机安装 NVIDIA Container Toolkit
 
 ## 6. 简明流程
 

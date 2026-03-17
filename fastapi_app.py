@@ -815,8 +815,12 @@ body{
 .span-12{grid-column:span 12}
 .panel-left{grid-column:span 6}
 .panel-right{grid-column:span 6;display:flex;flex-direction:column;align-self:stretch}
-.toolbar{display:flex;gap:8px;flex-wrap:wrap}
+.toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .toolbar.tight button{min-width:0}
+.toolbar-divider{width:1px;height:24px;background:var(--line);margin:0 4px}
+.inline-label{display:flex;align-items:center;gap:4px;font-size:13px;color:#31473a}
+.inline-label span{line-height:1.2;text-align:right}
+.inline-label input{padding:4px 6px;font-size:13px;min-height:auto}
 .stack{display:flex;flex-direction:column;gap:8px}
 .form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
 .dense-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;align-items:start}
@@ -853,6 +857,56 @@ body{
 .icon-item.selected{border-color:#7dbfa6;background:#eaf8f2;box-shadow:0 0 0 2px rgba(45,143,111,0.1) inset}
 .icon-item-title{font-size:12px;font-weight:700;color:#345545;word-break:break-word;line-height:1.3}
 .icon-item-meta{font-size:11px;color:#5d7468;line-height:1.2}
+/* 多选列表样式 */
+.multi-select-list{display:flex;flex-direction:column;gap:4px;max-height:380px;overflow-y:auto;border:1px solid var(--line);border-radius:10px;padding:8px;background:#fbfefc}
+.multi-select-item{
+    display:flex;align-items:center;gap:8px;
+    padding:8px 10px;border:1px solid transparent;border-radius:8px;
+    background:#fff;cursor:pointer;transition:all .15s ease;
+    user-select:none;
+}
+.multi-select-item:hover{background:#f1faf5;border-color:#d0e8dc}
+.multi-select-item.selected{background:#eaf8f2;border-color:#7dbfa6}
+.multi-select-item .checkbox{
+    width:18px;height:18px;border:1.5px solid #9ab8a8;border-radius:4px;
+    display:flex;align-items:center;justify-content:center;
+    background:#fff;flex-shrink:0;transition:all .15s ease;
+}
+.multi-select-item.selected .checkbox{background:#3aa27f;border-color:#3aa27f}
+.multi-select-item.selected .checkbox::after{
+    content:'✓';color:#fff;font-size:11px;font-weight:bold;
+}
+.multi-select-item .item-label{flex:1;font-size:13px;color:#415548;word-break:break-word}
+.multi-select-item .item-meta{font-size:11px;color:#7a8f82}
+/* 文件表格样式 */
+.file-table-container{flex:1;display:flex;flex-direction:column;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:#fff;min-height:130px}
+.file-table-header{display:flex;align-items:center;background:#f5f9f7;border-bottom:1px solid var(--line);padding:0 2px;flex-shrink:0}
+.file-table-header .file-table-col{padding:3px 4px;font-size:11px;font-weight:700;color:#31473a;line-height:1.1}
+.file-table-col.col-check{width:24px;text-align:center;flex-shrink:0}
+.file-table-col.col-name{flex:2;min-width:100px}
+.file-table-col.col-time{width:110px;flex-shrink:0}
+.file-table-col.col-size{width:80px;flex-shrink:0;text-align:right}
+.file-table-col.sortable{cursor:pointer;user-select:none}
+.file-table-col.sortable:hover{background:#e8f0ec}
+.sort-indicator{margin-left:2px;opacity:0.4}
+.sort-indicator.active{opacity:1}
+.sort-indicator.asc::after{content:'▲';font-size:9px}
+.sort-indicator.desc::after{content:'▼';font-size:9px}
+.file-table-body{flex:1;overflow-y:auto}
+.file-table-row{display:flex;align-items:center;padding:1px 2px;border-bottom:1px solid #f0f4f2;cursor:pointer;transition:background .15s ease;line-height:1}
+.file-table-row:last-child{border-bottom:none}
+.file-table-row:hover{background:#f5faf8}
+.file-table-row.selected{background:#e8f5ef}
+.file-table-row .file-table-col{padding:1px 4px;font-size:12px;color:#415548;line-height:1.1}
+.file-table-row .col-name{overflow-wrap:break-word;word-break:break-all;white-space:normal}
+.file-table-row .col-time{font-size:11px;color:#6b7f72}
+.file-table-row .col-size{font-size:11px;color:#6b7f72;text-align:right}
+.file-table-row .row-checkbox{width:12px;height:12px;cursor:pointer}
+.settings-section{margin-top:12px;padding:12px;background:#f8fbf9;border-radius:10px;border:1px solid var(--line)}
+.settings-section h3{margin:0 0 8px 0;font-size:14px;color:#31473a}
+.settings-grid{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap}
+.settings-grid .field.compact{min-width:120px}
+.settings-grid input[type="number"]{width:100px}
 .model-layout{display:grid;grid-template-columns:minmax(0,0.33fr) minmax(0,0.67fr);gap:10px}
 .params-grid-3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
 .params-grid-2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
@@ -925,6 +979,7 @@ button{
 button:hover{transform:translateY(-1px);background:#ecfaf4}
 .btn-danger{color:#8a2626;background:#fff4f4;border-color:#e8c4c4}
 .status{font-size:13px}
+.status.compact{border:none;background:transparent;padding:0;min-height:auto;font-size:12px;color:#5d7468}
 .folder-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px}
 .folder-item{padding:9px 10px;border:1px solid var(--line);border-radius:10px;background:#fbfefc;color:#415548;font-size:13px}
 .task-panel{
@@ -1153,10 +1208,18 @@ button:hover{transform:translateY(-1px);background:#ecfaf4}
         <section class="workspace">
             <article class="card panel-left stack">
                 <h3>历史文件夹</h3>
-                <p class="muted">统一管理历史任务目录，支持删除与快速刷新。</p>
-                <div class="toolbar">
+                <p class="muted">统一管理历史任务目录，支持多选删除（Shift/Ctrl）与快速刷新。</p>
+                <div class="toolbar" style="flex-wrap:wrap;gap:6px;align-items:center">
                     <button onclick="refreshHistory()">刷新历史</button>
-                    <button class="btn-danger" onclick="deleteFolder()">删除选中</button>
+                    <button onclick="toggleSelectAllFolders()">全选/取消</button>
+                    <button class="btn-danger" onclick="deleteSelectedFolders()">删除选中</button>
+                    <button class="btn-danger" onclick="deleteAllFolders()">删除全部</button>
+                    <span class="toolbar-divider"></span>
+                    <label class="inline-label" title="临时视频保留数量">
+                        <span>临时视频<br/>保留数量</span>
+                        <input type="number" id="tempVideoKeepCount" min="1" max="1000" value="5" onchange="saveTempFileSettings()" style="width:50px" />
+                    </label>
+                    <input id="tempFileStatus" class="status compact" style="width:80px" readonly />
                 </div>
                 <div class="field compact">
                     <label for="folderSearch">搜索历史文件夹</label>
@@ -1164,28 +1227,43 @@ button:hover{transform:translateY(-1px);background:#ecfaf4}
                 </div>
                 <div id="fileFolderSelectionState" class="selection-hint">当前已选：未选择历史文件夹</div>
                 <select id="folderSelect" onchange="refreshTextFiles()" style="display:none;"></select>
-                <div class="field">
-                    <label for="folderIconGrid">全部历史文件夹（图标位）</label>
-                    <div id="folderIconGrid" class="icon-grid"></div>
+                <div class="field" style="flex:1;display:flex;flex-direction:column;min-height:0">
+                    <label>全部历史文件夹</label>
+                    <div class="file-table-container">
+                        <div class="file-table-header">
+                            <div class="file-table-col col-check"><input type="checkbox" id="folderCheckAll" onclick="toggleSelectAllFolders()"/></div>
+                            <div class="file-table-col col-name sortable" onclick="sortFolders('name')">文件名 <span class="sort-indicator" id="folderSortName"></span></div>
+                            <div class="file-table-col col-time sortable" onclick="sortFolders('time')">创建时间 <span class="sort-indicator" id="folderSortTime"></span></div>
+                            <div class="file-table-col col-size sortable" onclick="sortFolders('size')">目录大小 <span class="sort-indicator" id="folderSortSize"></span></div>
+                        </div>
+                        <div id="folderListContainer" class="file-table-body"></div>
+                    </div>
                 </div>
             </article>
 
             <article class="card panel-right stack">
                 <h3>下载历史文本</h3>
-                <p class="muted">选中文件夹后，可浏览其中的 `.txt` 文件，并将全部文本打包下载为 ZIP。</p>
+                <p class="muted">选中文件夹后，可浏览其中的 `.txt` 文件，多选后打包下载为 ZIP。</p>
                 <div class="field compact">
                     <label for="textFileSearch">搜索历史文本</label>
                     <input id="textFileSearch" placeholder="输入关键字筛选文本文件" oninput="applyTextFileFilter()" />
                 </div>
                 <div id="fileTextSelectionState" class="selection-hint">当前已选：未选择历史文本</div>
                 <select id="textFileSelect" style="display:none;"></select>
-                <div class="field">
-                    <label for="textFileIconGrid">全部历史文本（图标位）</label>
-                    <div id="textFileIconGrid" class="icon-grid"></div>
+                <div class="field" style="flex:1;display:flex;flex-direction:column;min-height:0">
+                    <label>全部历史文本</label>
+                    <div class="file-table-container">
+                        <div class="file-table-header">
+                            <div class="file-table-col col-check"><input type="checkbox" id="textFileCheckAll" onclick="toggleSelectAllTextFiles()"/></div>
+                            <div class="file-table-col col-name sortable" onclick="sortTextFiles('name')">文件名 <span class="sort-indicator" id="textFileSortName"></span></div>
+                            <div class="file-table-col col-time sortable" onclick="sortTextFiles('time')">修改时间 <span class="sort-indicator" id="textFileSortTime"></span></div>
+                        </div>
+                        <div id="textFileListContainer" class="file-table-body"></div>
+                    </div>
                 </div>
                 <div class="toolbar">
                     <button onclick="refreshTextFiles()">刷新文本列表</button>
-                    <button onclick="downloadTextFile()">下载全部文本 ZIP</button>
+                    <button onclick="downloadSelectedTextFiles()">下载选中文本 ZIP</button>
                 </div>
             </article>
         </section>
@@ -1317,7 +1395,16 @@ const APP_DEFAULTS = {
 let currentJobId = "";
 let pollTimer = null;
 let foldersList = [];
+let foldersListMeta = [];  // 文件夹元数据 [{name, mtime, size}]
+let selectedFolders = new Set();
+let lastClickedFolder = null;
+let folderSortBy = 'time';  // 'name' | 'time' | 'size'
+let folderSortOrder = 'desc';  // 'asc' | 'desc'
 let textFilesMeta = [];
+let selectedTextFiles = new Set();
+let lastClickedTextFile = null;
+let textFileSortBy = 'time';  // 'name' | 'time'
+let textFileSortOrder = 'desc';  // 'asc' | 'desc'
 let profileNamesList = [];
 let folderFilterKeyword = '';
 let textFileFilterKeyword = '';
@@ -1472,31 +1559,506 @@ function renderIconGrid(containerId, items, selectedValue, onPick, keyword){
 
 function applyFolderFilter(){
     folderFilterKeyword = (document.getElementById('folderSearch')?.value || '').trim().toLowerCase();
-    const selected = document.getElementById('folderSelect')?.value || '';
-    renderIconGrid(
-        'folderIconGrid',
-        foldersList.map(v=>({value:v, label:v, meta:'任务目录'})),
-        selected,
-        selectFolder,
-        folderFilterKeyword
-    );
+    renderFolderList();
+    updateFolderSelectionState();
+}
+
+function sortFolders(by){
+    if(folderSortBy === by){
+        folderSortOrder = folderSortOrder === 'asc' ? 'desc' : 'asc';
+    } else {
+        folderSortBy = by;
+        folderSortOrder = by === 'name' ? 'asc' : 'desc';
+    }
+    updateFolderSortIndicators();
+    renderFolderList();
+}
+
+function updateFolderSortIndicators(){
+    ['name', 'time', 'size'].forEach(col => {
+        const el = document.getElementById('folderSort' + col.charAt(0).toUpperCase() + col.slice(1));
+        if(el){
+            el.className = 'sort-indicator';
+            if(folderSortBy === col){
+                el.classList.add('active', folderSortOrder);
+            }
+        }
+    });
+}
+
+function renderFolderList(){
+    const container = document.getElementById('folderListContainer');
+    if(!container) return;
+    const kw = folderFilterKeyword.toLowerCase();
+
+    // 创建元数据映射
+    const metaMap = new Map();
+    foldersListMeta.forEach(f => {
+        metaMap.set(f.name, { mtime: f.mtime, size: f.size });
+    });
+
+    // 过滤
+    let filtered = foldersList.filter(name => !kw || name.toLowerCase().includes(kw));
+
+    const filteredWithMeta = filtered.map(name => ({
+        name,
+        meta: metaMap.get(name) || { mtime: 0, size: 0 }
+    }));
+
+    // 排序
+    const mult = folderSortOrder === 'asc' ? 1 : -1;
+    if(folderSortBy === 'time'){
+        filteredWithMeta.sort((a, b) => mult * ((a.meta?.mtime || 0) - (b.meta?.mtime || 0)));
+    } else if(folderSortBy === 'size'){
+        filteredWithMeta.sort((a, b) => mult * ((a.meta?.size || 0) - (b.meta?.size || 0)));
+    } else {
+        filteredWithMeta.sort((a, b) => mult * a.name.localeCompare(b.name, 'zh-Hans-CN'));
+    }
+
+    // 更新全选复选框状态
+    const checkAll = document.getElementById('folderCheckAll');
+    if(checkAll){
+        checkAll.checked = filteredWithMeta.length > 0 && filteredWithMeta.every(item => selectedFolders.has(item.name));
+    }
+
+    container.innerHTML = '';
+    if(!filteredWithMeta.length){
+        const empty = document.createElement('div');
+        empty.className = 'selection-hint';
+        empty.style.padding = '20px';
+        empty.style.textAlign = 'center';
+        empty.textContent = '暂无匹配项';
+        container.appendChild(empty);
+        return;
+    }
+
+    filteredWithMeta.forEach((item, index) => {
+        const folderName = item.name;
+        const meta = item.meta;
+
+        const row = document.createElement('div');
+        row.className = 'file-table-row' + (selectedFolders.has(folderName) ? ' selected' : '');
+        row.dataset.value = folderName;
+        row.dataset.index = index;
+
+        // 复选框列
+        const checkCol = document.createElement('div');
+        checkCol.className = 'file-table-col col-check';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.className = 'row-checkbox';
+        checkbox.checked = selectedFolders.has(folderName);
+        checkbox.onclick = (e) => e.stopPropagation();
+        checkbox.onchange = (e) => {
+            if(e.target.checked){
+                selectedFolders.add(folderName);
+            } else {
+                selectedFolders.delete(folderName);
+            }
+            renderFolderList();
+            updateFolderSelectionState();
+        };
+        checkCol.appendChild(checkbox);
+
+        // 文件名列
+        const nameCol = document.createElement('div');
+        nameCol.className = 'file-table-col col-name';
+        nameCol.textContent = folderName;
+        nameCol.title = folderName;
+
+        // 时间列
+        const timeCol = document.createElement('div');
+        timeCol.className = 'file-table-col col-time';
+        timeCol.textContent = formatDateTime(meta?.mtime || 0);
+
+        // 大小列
+        const sizeCol = document.createElement('div');
+        sizeCol.className = 'file-table-col col-size';
+        sizeCol.textContent = formatSize(meta?.size || 0);
+
+        row.appendChild(checkCol);
+        row.appendChild(nameCol);
+        row.appendChild(timeCol);
+        row.appendChild(sizeCol);
+
+        row.onclick = (e) => handleFolderClick(folderName, e, index);
+        container.appendChild(row);
+    });
+
+    updateFolderSortIndicators();
+}
+
+function formatSize(sizeMb){
+    if(!sizeMb || sizeMb <= 0) return '';
+    if(sizeMb < 1) return `${(sizeMb * 1024).toFixed(0)} KB`;
+    else if(sizeMb < 1024) return `${sizeMb.toFixed(1)} MB`;
+    else return `${(sizeMb / 1024).toFixed(2)} GB`;
+}
+function formatDateTime(timestamp){
+    if(!timestamp) return '';
+    const date = new Date(timestamp * 1000);
+    const now = new Date();
+    const diff = Math.floor((now - date) / 1000);
+    if(diff < 60) return '刚刚';
+    else if(diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;
+    else if(diff < 86400) return `${Math.floor(diff / 3600)} 小时前`;
+    else if(diff < 86400 * 30) return `${Math.floor(diff / 86400)} 天前`;
+    else {
+        const y = date.getFullYear();
+        const month = date.getMonth() + 1;
+        const day = date.getDate();
+        const hh = String(date.getHours()).padStart(2, '0');
+        const mm = String(date.getMinutes()).padStart(2, '0');
+        return `${y}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')} ${hh}:${mm}`;
+    }
+}
+
+function handleFolderClick(folderName, event, index){
+    const ctrl = event.ctrlKey || event.metaKey;
+    const shift = event.shiftKey;
+
+    if(shift && typeof lastClickedFolder === 'number' && lastClickedFolder >= 0){
+        // Shift 多选：选中从上次点击到当前的所有项（基于显示顺序）
+        const start = Math.min(lastClickedFolder, index);
+        const end = Math.max(lastClickedFolder, index);
+        const container = document.getElementById('folderListContainer');
+        if(container){
+            const rows = container.querySelectorAll('.file-table-row');
+            for(let i = start; i <= end && i < rows.length; i++){
+                selectedFolders.add(rows[i].dataset.value);
+            }
+        }
+    } else if(ctrl){
+        // Ctrl 切换单个选中状态
+        if(selectedFolders.has(folderName)){
+            selectedFolders.delete(folderName);
+        } else {
+            selectedFolders.add(folderName);
+        }
+    } else {
+        // 普通点击：单选或取消
+        if(selectedFolders.has(folderName) && selectedFolders.size === 1){
+            selectedFolders.clear();
+        } else {
+            selectedFolders.clear();
+            selectedFolders.add(folderName);
+        }
+    }
+
+    lastClickedFolder = index;
+    renderFolderList();
+    updateFolderSelectionState();
+
+    // 同步到隐藏的 select（用于下载等功能）
+    const select = document.getElementById('folderSelect');
+    if(select && selectedFolders.size === 1){
+        select.value = [...selectedFolders][0];
+        select.dispatchEvent(new Event('change', {bubbles:true}));
+    }
+}
+
+function updateFolderSelectionState(){
+    const stateEl = document.getElementById('fileFolderSelectionState');
+    if(!stateEl) return;
+    if(selectedFolders.size === 0){
+        stateEl.textContent = '当前已选：未选择历史文件夹';
+    } else if(selectedFolders.size === 1){
+        stateEl.textContent = `当前已选：${[...selectedFolders][0]}`;
+    } else {
+        stateEl.textContent = `当前已选 ${selectedFolders.size} 个文件夹`;
+    }
+}
+
+function toggleSelectAllFolders(){
+    const kw = folderFilterKeyword.toLowerCase();
+    const filtered = foldersList.filter(name => !kw || name.toLowerCase().includes(kw));
+    const allSelected = filtered.every(name => selectedFolders.has(name));
+
+    if(allSelected){
+        filtered.forEach(name => selectedFolders.delete(name));
+    } else {
+        filtered.forEach(name => selectedFolders.add(name));
+    }
+    renderFolderList();
+    updateFolderSelectionState();
+}
+
+async function deleteSelectedFolders(){
+    if(selectedFolders.size === 0){
+        alert('请先选择要删除的文件夹');
+        return;
+    }
+    const count = selectedFolders.size;
+    if(!confirm(`确定要删除选中的 ${count} 个文件夹吗？此操作不可恢复。`)){
+        return;
+    }
+
+    const folders = [...selectedFolders];
+    try{
+        const data = await api('/api/folders/delete-batch', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({folder_names: folders})
+        });
+        alert(data.message || `成功删除 ${data.deleted_count || count} 个文件夹`);
+    }catch(e){
+        alert('删除失败: ' + e.message);
+    }
+
+    // 无论成功与否，都清除相关状态并刷新
+    selectedFolders.clear();
+    lastClickedFolder = null;
+    textFilesMeta = [];
+    selectedTextFiles.clear();
+    lastClickedTextFile = null;
+    await refreshHistory();
+}
+
+async function deleteAllFolders(){
+    if(foldersList.length === 0){
+        alert('没有可删除的文件夹');
+        return;
+    }
+    const count = foldersList.length;
+    if(!confirm(`确定要删除全部 ${count} 个文件夹吗？此操作不可恢复！`)){
+        return;
+    }
+    if(!confirm(`再次确认：将删除所有 ${count} 个历史文件夹，此操作不可恢复！`)){
+        return;
+    }
+
+    // 保存当前列表副本，用于删除
+    const toDelete = [...foldersList];
+
+    try{
+        const data = await api('/api/folders/delete-batch', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({folder_names: toDelete})
+        });
+        alert(data.message || `成功删除 ${data.deleted_count || count} 个文件夹`);
+    }catch(e){
+        alert('删除失败: ' + e.message);
+    }
+
+    // 无论成功与否，都清除所有相关状态并刷新
+    selectedFolders.clear();
+    lastClickedFolder = null;
+    foldersList = [];
+    foldersListMeta = [];
+    textFilesMeta = [];
+    selectedTextFiles.clear();
+    lastClickedTextFile = null;
+
+    // 重新获取最新列表
+    await refreshHistory();
+}
+
+function sortTextFiles(by){
+    if(textFileSortBy === by){
+        textFileSortOrder = textFileSortOrder === 'asc' ? 'desc' : 'asc';
+    } else {
+        textFileSortBy = by;
+        textFileSortOrder = by === 'name' ? 'asc' : 'desc';
+    }
+    updateTextFileSortIndicators();
+    renderTextFileList();
+}
+
+function updateTextFileSortIndicators(){
+    ['name', 'time'].forEach(col => {
+        const el = document.getElementById('textFileSort' + col.charAt(0).toUpperCase() + col.slice(1));
+        if(el){
+            el.className = 'sort-indicator';
+            if(textFileSortBy === col){
+                el.classList.add('active', textFileSortOrder);
+            }
+        }
+    });
 }
 
 function applyTextFileFilter(){
     textFileFilterKeyword = (document.getElementById('textFileSearch')?.value || '').trim().toLowerCase();
-    const selected = document.getElementById('textFileSelect')?.value || '';
-    renderIconGrid(
-        'textFileIconGrid',
-        textFilesMeta.map(item=>({
-            value:item.name,
-            label:item.name,
-            meta:item.mtime ? formatRelativeTime(item.mtime) : '未知时间',
-            title:item.mtime ? `修改时间: ${formatAbsoluteTime(item.mtime)}` : '修改时间: 未知'
-        })),
-        selected,
-        selectTextFile,
-        textFileFilterKeyword
-    );
+    renderTextFileList();
+    updateTextFileSelectionState();
+}
+
+function renderTextFileList(){
+    const container = document.getElementById('textFileListContainer');
+    if(!container) return;
+    const kw = textFileFilterKeyword.toLowerCase();
+
+    // 过滤
+    let filtered = textFilesMeta.filter(item => !kw || item.name.toLowerCase().includes(kw));
+
+    // 排序
+    const mult = textFileSortOrder === 'asc' ? 1 : -1;
+    if(textFileSortBy === 'time'){
+        filtered.sort((a, b) => mult * ((a.mtime || 0) - (b.mtime || 0)));
+    } else {
+        filtered.sort((a, b) => mult * a.name.localeCompare(b.name, 'zh-Hans-CN'));
+    }
+
+    // 更新全选复选框状态
+    const checkAll = document.getElementById('textFileCheckAll');
+    if(checkAll){
+        checkAll.checked = filtered.length > 0 && filtered.every(item => selectedTextFiles.has(item.name));
+    }
+
+    container.innerHTML = '';
+    if(!filtered.length){
+        const empty = document.createElement('div');
+        empty.className = 'selection-hint';
+        empty.style.padding = '20px';
+        empty.style.textAlign = 'center';
+        empty.textContent = '暂无匹配项';
+        container.appendChild(empty);
+        return;
+    }
+
+    filtered.forEach((item, index) => {
+        const fileName = item.name;
+        const mtime = item.mtime || 0;
+
+        const row = document.createElement('div');
+        row.className = 'file-table-row' + (selectedTextFiles.has(fileName) ? ' selected' : '');
+        row.dataset.value = fileName;
+        row.dataset.index = index;
+
+        // 复选框列
+        const checkCol = document.createElement('div');
+        checkCol.className = 'file-table-col col-check';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.className = 'row-checkbox';
+        checkbox.checked = selectedTextFiles.has(fileName);
+        checkbox.onclick = (e) => e.stopPropagation();
+        checkbox.onchange = (e) => {
+            if(e.target.checked){
+                selectedTextFiles.add(fileName);
+            } else {
+                selectedTextFiles.delete(fileName);
+            }
+            renderTextFileList();
+            updateTextFileSelectionState();
+        };
+        checkCol.appendChild(checkbox);
+
+        // 文件名列
+        const nameCol = document.createElement('div');
+        nameCol.className = 'file-table-col col-name';
+        nameCol.textContent = fileName;
+        nameCol.title = fileName;
+
+        // 时间列
+        const timeCol = document.createElement('div');
+        timeCol.className = 'file-table-col col-time';
+        timeCol.textContent = formatDateTime(mtime);
+
+        row.appendChild(checkCol);
+        row.appendChild(nameCol);
+        row.appendChild(timeCol);
+
+        row.onclick = (e) => handleTextFileClick(fileName, e, index);
+        container.appendChild(row);
+    });
+
+    updateTextFileSortIndicators();
+}
+
+function handleTextFileClick(fileName, event, index){
+    const ctrl = event.ctrlKey || event.metaKey;
+    const shift = event.shiftKey;
+
+    if(shift && typeof lastClickedTextFile === 'number' && lastClickedTextFile >= 0){
+        // Shift 多选
+        const start = Math.min(lastClickedTextFile, index);
+        const end = Math.max(lastClickedTextFile, index);
+        const container = document.getElementById('textFileListContainer');
+        if(container){
+            const rows = container.querySelectorAll('.file-table-row');
+            for(let i = start; i <= end && i < rows.length; i++){
+                selectedTextFiles.add(rows[i].dataset.value);
+            }
+        }
+    } else if(ctrl){
+        // Ctrl 切换
+        if(selectedTextFiles.has(fileName)){
+            selectedTextFiles.delete(fileName);
+        } else {
+            selectedTextFiles.add(fileName);
+        }
+    } else {
+        // 普通点击
+        if(selectedTextFiles.has(fileName) && selectedTextFiles.size === 1){
+            selectedTextFiles.clear();
+        } else {
+            selectedTextFiles.clear();
+            selectedTextFiles.add(fileName);
+        }
+    }
+
+    lastClickedTextFile = index;
+    renderTextFileList();
+    updateTextFileSelectionState();
+
+    // 同步到隐藏的 select
+    const select = document.getElementById('textFileSelect');
+    if(select && selectedTextFiles.size === 1){
+        select.value = [...selectedTextFiles][0];
+    }
+}
+
+function updateTextFileSelectionState(){
+    const stateEl = document.getElementById('fileTextSelectionState');
+    if(!stateEl) return;
+    if(selectedTextFiles.size === 0){
+        stateEl.textContent = '当前已选：未选择历史文本';
+    } else if(selectedTextFiles.size === 1){
+        stateEl.textContent = `当前已选：${[...selectedTextFiles][0]}`;
+    } else {
+        stateEl.textContent = `当前已选 ${selectedTextFiles.size} 个文本文件`;
+    }
+}
+
+function toggleSelectAllTextFiles(){
+    const container = document.getElementById('textFileListContainer');
+    if(!container) return;
+
+    // 获取当前过滤后的文件列表
+    const kw = textFileFilterKeyword.toLowerCase();
+    const filtered = textFilesMeta.filter(item => !kw || item.name.toLowerCase().includes(kw));
+
+    const allSelected = filtered.every(item => selectedTextFiles.has(item.name));
+
+    if(allSelected){
+        // 取消全选
+        filtered.forEach(item => selectedTextFiles.delete(item.name));
+    } else {
+        // 全选
+        filtered.forEach(item => selectedTextFiles.add(item.name));
+    }
+
+    renderTextFileList();
+    updateTextFileSelectionState();
+}
+
+async function downloadSelectedTextFiles(){
+    if(selectedTextFiles.size === 0){
+        alert('请先选择要下载的文本文件');
+        return;
+    }
+
+    const folder = document.getElementById('folderSelect')?.value;
+    if(!folder){
+        alert('请先选择文件夹');
+        return;
+    }
+
+    const fileNames = [...selectedTextFiles];
+    const url = '/api/folders/download-selected-text?folder_name=' + encodeURIComponent(folder) +
+                '&files=' + encodeURIComponent(fileNames.join(','));
+    window.open(url, '_blank');
 }
 
 function applyProfileFilter(){
@@ -1590,19 +2152,12 @@ async function createNewProfileFromCurrent(){
     document.getElementById('profileName').select();
 }
 
-function selectFolder(folderName){
-    const select = document.getElementById('folderSelect');
-    if(!select) return;
-    select.value = folderName;
-    select.dispatchEvent(new Event('change', {bubbles:true}));
-    applyFolderFilter();
-    syncSelectionStates();
-}
-
 function selectTextFile(fileName){
     const select = document.getElementById('textFileSelect');
     if(!select) return;
     select.value = fileName;
+    selectedTextFiles.clear();
+    selectedTextFiles.add(fileName);
     applyTextFileFilter();
     syncSelectionStates();
 }
@@ -1655,6 +2210,34 @@ function updateSelectionClass(selectId){
 function setSelectionState(stateId, text){
     const el = document.getElementById(stateId);
     if(el){ el.textContent = text; }
+}
+
+async function loadTempFileSettings(){
+    try{
+        const data = await api('/api/settings/temp-files');
+        const videoInput = document.getElementById('tempVideoKeepCount');
+        if(videoInput) videoInput.value = data.temp_video_keep_count || 5;
+    }catch(e){
+        console.error('加载临时文件设置失败', e);
+    }
+}
+
+async function saveTempFileSettings(){
+    const videoCount = document.getElementById('tempVideoKeepCount')?.value;
+    const statusEl = document.getElementById('tempFileStatus');
+
+    try{
+        const data = await api('/api/settings/temp-files', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                temp_video_keep_count: parseInt(videoCount) || 5
+            })
+        });
+        if(statusEl) statusEl.value = data.message || '已保存';
+    }catch(e){
+        if(statusEl) statusEl.value = '失败';
+    }
 }
 
 function syncSelectionStates(){
@@ -1924,29 +2507,25 @@ async function refreshHistory(preferredValue=''){
             hv.value = values[0];
         }
         foldersList = data.folders || [];
+        foldersListMeta = data.folders_meta || [];
+        // 刷新时清除选中状态
+        selectedFolders.clear();
+        lastClickedFolder = null;
         setHiddenSelectOptions('folderSelect', foldersList, document.getElementById('folderSelect')?.value || '');
         applyFolderFilter();
-    await refreshTextFiles();
-    syncSelectionStates();
-}
-
-async function deleteFolder(){
-  const name = document.getElementById('folderSelect').value;
-    if(!name){
-        alert('请先选择要删除的历史文件夹');
-        return;
-    }
-  const data = await api('/api/folders/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({folder_name:name})});
-    alert(data.message || '删除完成');
-  await refreshHistory();
+        await refreshTextFiles();
+        syncSelectionStates();
 }
 
 async function refreshTextFiles(){
     const folder = document.getElementById('folderSelect').value;
     if(!folder){
         textFilesMeta = [];
+        selectedTextFiles.clear();
+        lastClickedTextFile = null;
         setHiddenSelectOptions('textFileSelect', [], '');
         applyTextFileFilter();
+        updateTextFileSelectionState();
         syncSelectionStates();
         return;
     }
@@ -1957,13 +2536,19 @@ async function refreshTextFiles(){
             : (data.text_files || []).map(name=>({name, mtime:0}));
         const names = textFilesMeta.map(item=>item.name);
         setHiddenSelectOptions('textFileSelect', names, '');
+        selectedTextFiles.clear();
+        lastClickedTextFile = null;
         applyTextFileFilter();
+        updateTextFileSelectionState();
         syncSelectionStates();
     }catch(e){
         console.error('文本列表获取失败', e);
         textFilesMeta = [];
+        selectedTextFiles.clear();
+        lastClickedTextFile = null;
         setHiddenSelectOptions('textFileSelect', [], '');
         applyTextFileFilter();
+        updateTextFileSelectionState();
         syncSelectionStates();
     }
 }
@@ -2189,6 +2774,10 @@ async function downloadVideoUrl(){
 }
 
 async function startTranscribe(){
+  // 清空识别文本框
+  const plainText = document.getElementById('plainText');
+  if(plainText) plainText.value = '';
+
   const fd = new FormData();
   const f = document.getElementById('videoFile').files[0];
   if(f){ fd.append('video_file', f); }
@@ -2199,6 +2788,13 @@ async function startTranscribe(){
   if(!r.ok){ throw new Error(await r.text()); }
   const data = await r.json();
   currentJobId = data.job_id;
+
+  // 如果返回了视频路径，更新当前视频选择框
+  if(data.video_path){
+    // 刷新历史列表并选中当前视频
+    await refreshHistory(data.video_path);
+  }
+
   startPoll();
 }
 
@@ -2289,6 +2885,7 @@ function initDragZones() {
 (async function init(){
   await refreshHistory();
   await loadProfiles();
+  await loadTempFileSettings();
     bindSelectionListeners();
     syncSelectionStates();
         updateTaskPanel({});
@@ -2307,9 +2904,11 @@ function initDragZones() {
 
 @app.get("/api/history")
 def api_history():
+    folders_meta = core._list_job_folders_meta()
     return {
         "videos": core._list_uploaded_videos(),
-        "folders": core._list_job_folders(),
+        "folders": [f["name"] for f in folders_meta],
+        "folders_meta": folders_meta,
     }
 
 
@@ -2318,6 +2917,48 @@ def api_delete_folder(payload: dict[str, str]):
     name = payload.get("folder_name", "")
     status, *_ = core._delete_job_folder(name)
     return {"message": status}
+
+
+@app.post("/api/folders/delete-batch")
+def api_delete_folders_batch(payload: dict):
+    """批量删除多个文件夹"""
+    names = payload.get("folder_names", [])
+    if not isinstance(names, list) or not names:
+        return {"message": "未提供要删除的文件夹", "deleted_count": 0}
+
+    deleted = 0
+    skipped = 0
+    errors = []
+    for name in names:
+        if not isinstance(name, str) or not name.strip():
+            continue
+        try:
+            status, *_ = core._delete_job_folder(name.strip())
+            # 检查删除成功的多种标识
+            if "成功" in status or "已删除" in status or "deleted" in status.lower():
+                deleted += 1
+            elif "不存在" in status:
+                skipped += 1
+            else:
+                errors.append(f"{name}: {status}")
+        except Exception as e:
+            err_str = str(e)
+            if "不存在" in err_str:
+                skipped += 1
+            else:
+                errors.append(f"{name}: {err_str}")
+
+    # 构建结果消息
+    parts = []
+    if deleted > 0:
+        parts.append(f"删除 {deleted} 个")
+    if skipped > 0:
+        parts.append(f"跳过 {skipped} 个（不存在）")
+    if errors:
+        parts.append(f"失败: {'; '.join(errors[:3])}")
+
+    message = "，".join(parts) if parts else "无操作"
+    return {"message": message, "deleted_count": deleted, "skipped_count": skipped}
 
 
 @app.get("/api/folders/text-files")
@@ -2357,6 +2998,102 @@ def api_download_text_file(folder_name: str):
     zip_name = f"{folder.name}.texts.zip"
     headers = {"Content-Disposition": f'attachment; filename="{zip_name}"'}
     return StreamingResponse(buffer, media_type="application/zip", headers=headers)
+
+
+@app.get("/api/folders/download-selected-text")
+def api_download_selected_text_files(folder_name: str, files: str):
+    folder = _resolve_workspace_folder(folder_name)
+
+    # 解析文件列表
+    file_names = [f.strip() for f in files.split(",") if f.strip()]
+    if not file_names:
+        raise HTTPException(status_code=400, detail="未指定要下载的文件")
+
+    # 验证并收集文件
+    text_files = []
+    for name in file_names:
+        file_path = folder / name
+        if not file_path.exists() or not file_path.is_file():
+            continue
+        # 安全检查：确保文件在 folder 目录内
+        try:
+            file_path.resolve().relative_to(folder.resolve())
+        except ValueError:
+            continue
+        if file_path.suffix.lower() == ".txt":
+            text_files.append(file_path)
+
+    if not text_files:
+        raise HTTPException(status_code=404, detail="未找到有效的文本文件")
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for text_file in text_files:
+            zf.write(text_file, arcname=text_file.name)
+    buffer.seek(0)
+
+    zip_name = f"{folder.name}.selected.zip"
+    headers = {"Content-Disposition": f'attachment; filename="{zip_name}"'}
+    return StreamingResponse(buffer, media_type="application/zip", headers=headers)
+
+
+@app.get("/api/settings/temp-files")
+def api_get_temp_file_settings():
+    """获取临时文件保留数量设置"""
+    return {
+        "temp_video_keep_count": core.TEMP_VIDEO_KEEP_COUNT,
+    }
+
+
+@app.post("/api/settings/temp-files")
+def api_set_temp_file_settings(payload: dict):
+    """更新临时文件保留数量设置"""
+    video_count = payload.get("temp_video_keep_count")
+    messages = []
+
+    if video_count is not None:
+        try:
+            video_count = int(video_count)
+            if video_count < 1:
+                video_count = 1
+            elif video_count > 100:
+                video_count = 100
+            core.TEMP_VIDEO_KEEP_COUNT = video_count
+            os.environ["TEMP_VIDEO_KEEP_COUNT"] = str(video_count)
+            messages.append(f"临时视频保留 {video_count} 个")
+        except (ValueError, TypeError):
+            pass
+
+    # 保存到 .env 文件
+    try:
+        env_path = Path(__file__).parent / ".env"
+        lines = []
+        if env_path.exists():
+            lines = env_path.read_text(encoding="utf-8").splitlines()
+
+        updated = False
+        new_lines = []
+        for line in lines:
+            if line.startswith("TEMP_VIDEO_KEEP_COUNT="):
+                if video_count is not None:
+                    new_lines.append(f"TEMP_VIDEO_KEEP_COUNT={video_count}")
+                    updated = True
+                else:
+                    new_lines.append(line)
+            else:
+                new_lines.append(line)
+
+        if video_count is not None and not updated:
+            new_lines.append(f"TEMP_VIDEO_KEEP_COUNT={video_count}")
+
+        env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    except Exception as e:
+        messages.append(f"保存失败: {e}")
+
+    return {
+        "message": " | ".join(messages) if messages else "已保存",
+        "temp_video_keep_count": core.TEMP_VIDEO_KEEP_COUNT,
+    }
 
 
 @app.get("/api/model/profiles")
@@ -2700,12 +3437,34 @@ def api_transcribe_start(
         if not core._is_supported_media_path(orig_name):
             raise HTTPException(status_code=400, detail="仅支持视频或音频文件上传")
         core.TEMP_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
-        save_path = core._unique_file_path(core.TEMP_VIDEO_DIR, orig_name)
-        with save_path.open("wb") as f:
-            shutil.copyfileobj(video_file.file, f)
+
+        # 先保存到临时文件（带 .upload 后缀）
+        temp_upload_path = core.TEMP_VIDEO_DIR / f".upload_{uuid.uuid4().hex}"
+        try:
+            with temp_upload_path.open("wb") as f:
+                shutil.copyfileobj(video_file.file, f)
+
+            # 保存完成后检查是否有重复文件（排除文件名，只比较内容）
+            duplicate = core._find_duplicate_file(temp_upload_path, core.TEMP_VIDEO_DIR)
+            if duplicate:
+                # 找到重复文件，删除刚上传的，使用已存在的文件
+                temp_upload_path.unlink()
+                try:
+                    duplicate.touch()  # 更新访问时间
+                except OSError:
+                    pass
+                video_path = str(duplicate)
+            else:
+                # 没有重复，移动到正式位置
+                save_path = core._unique_file_path(core.TEMP_VIDEO_DIR, orig_name)
+                temp_upload_path.rename(save_path)
+                video_path = str(save_path)
+        finally:
+            # 清理可能残留的临时文件
+            if temp_upload_path.exists():
+                temp_upload_path.unlink()
+
         core._prune_temp_video_dir()
-        video_path = str(save_path)
-        # 文件已在正确位置，无需后续清理
     elif history_video:
         video_path = core._resolve_input_path(None, history_video) or ""
         if video_path and not core._is_supported_media_path(video_path):
@@ -2736,7 +3495,14 @@ def api_transcribe_start(
 
     _RUNTIME_THREAD = threading.Thread(target=runner, daemon=True)
     _RUNTIME_THREAD.start()
-    return {"job_id": job.job_id}
+    # 返回相对路径供前端显示
+    display_path = ""
+    if video_path:
+        try:
+            display_path = str(Path(video_path).relative_to(Path(__file__).parent))
+        except ValueError:
+            display_path = video_path
+    return {"job_id": job.job_id, "video_path": display_path}
 
 
 @app.get("/api/jobs/{job_id}")

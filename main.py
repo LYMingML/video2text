@@ -15,6 +15,7 @@ import sys
 import json
 import shutil
 import zipfile
+import sqlite3
 import logging
 import argparse
 import subprocess
@@ -55,7 +56,156 @@ WORKSPACE_DIR = Path(__file__).parent / "workspace"
 WORKSPACE_DIR.mkdir(exist_ok=True)
 TEMP_VIDEO_DIR = WORKSPACE_DIR / "temp_video"
 TEMP_VIDEO_DIR.mkdir(exist_ok=True)
-TEMP_VIDEO_KEEP_COUNT = 10
+
+
+def _get_temp_video_keep_count():
+    """从环境变量读取临时视频保留数量"""
+    try:
+        return int(os.environ.get("TEMP_VIDEO_KEEP_COUNT", "5"))
+    except (ValueError, TypeError):
+        return 5
+
+
+TEMP_VIDEO_KEEP_COUNT = _get_temp_video_keep_count()
+
+# 文件指纹数据库
+_FINGERPRINT_DB_PATH = WORKSPACE_DIR / "fingerprints.db"
+_fingerprint_db_lock = threading.Lock()
+
+
+def _init_fingerprint_db():
+    """初始化文件指纹数据库"""
+    conn = sqlite3.connect(_FINGERPRINT_DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS file_fingerprints (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_path TEXT UNIQUE NOT NULL,
+            file_size INTEGER NOT NULL,
+            head_50 BLOB,
+            tail_50 BLOB,
+            updated_at REAL
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_file_size ON file_fingerprints(file_size)")
+    conn.commit()
+    conn.close()
+
+
+_init_fingerprint_db()
+
+
+def _cleanup_fingerprint_db():
+    """清理数据库中不存在于缓存目录的文件记录"""
+    with _fingerprint_db_lock:
+        conn = sqlite3.connect(_FINGERPRINT_DB_PATH)
+        cursor = conn.execute("SELECT file_path FROM file_fingerprints")
+        existing_paths = [row[0] for row in cursor.fetchall()]
+
+        deleted = 0
+        for path_str in existing_paths:
+            if not Path(path_str).exists():
+                conn.execute("DELETE FROM file_fingerprints WHERE file_path = ?", (path_str,))
+                deleted += 1
+
+        conn.commit()
+        conn.close()
+        return deleted
+
+
+def _get_file_fingerprint(file_path: Path) -> dict:
+    """获取文件指纹：大小、文件头50字节、文件尾50字节"""
+    try:
+        stat = file_path.stat()
+        fingerprint = {
+            "path": str(file_path),
+            "size": stat.st_size,
+        }
+        if stat.st_size > 0:
+            try:
+                with open(file_path, "rb") as f:
+                    head = f.read(50)
+                    fingerprint["head_50"] = head
+                    if stat.st_size > 50:
+                        f.seek(-50, 2)
+                        tail = f.read(50)
+                        fingerprint["tail_50"] = tail
+            except OSError:
+                pass
+        return fingerprint
+    except OSError:
+        return {}
+
+
+def _save_fingerprint_to_db(fingerprint: dict):
+    """保存文件指纹到数据库"""
+    if not fingerprint or "path" not in fingerprint:
+        return
+    with _fingerprint_db_lock:
+        conn = sqlite3.connect(_FINGERPRINT_DB_PATH)
+        conn.execute("""
+            INSERT OR REPLACE INTO file_fingerprints
+            (file_path, file_size, head_50, tail_50, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            fingerprint["path"],
+            fingerprint.get("size", 0),
+            fingerprint.get("head_50"),
+            fingerprint.get("tail_50"),
+            time.time()
+        ))
+        conn.commit()
+        conn.close()
+
+
+def _find_duplicate_file(src_path: Path, search_dir: Path) -> Path | None:
+    """在指定目录中查找与源文件内容相同的文件（比较大小、文件头50字节、文件尾50字节）"""
+    if not src_path.exists() or not search_dir.exists():
+        return None
+
+    src_fp = _get_file_fingerprint(src_path)
+    if not src_fp or src_fp.get("size", 0) == 0:
+        return None
+
+    # 先清理数据库中的无效记录
+    _cleanup_fingerprint_db()
+
+    # 确保缓存目录中的文件指纹都已入库
+    for f in search_dir.iterdir():
+        if f.is_file() and f.suffix.lower() in _SOURCE_MEDIA_EXTS:
+            if f.resolve() != src_path.resolve():
+                fp = _get_file_fingerprint(f)
+                if fp:
+                    _save_fingerprint_to_db(fp)
+
+    # 在数据库中查找匹配
+    with _fingerprint_db_lock:
+        conn = sqlite3.connect(_FINGERPRINT_DB_PATH)
+        cursor = conn.execute("""
+            SELECT file_path FROM file_fingerprints
+            WHERE file_size = ? AND file_path != ?
+        """, (src_fp["size"], str(src_path)))
+        candidates = [row[0] for row in cursor.fetchall()]
+        conn.close()
+
+    # 对候选文件进行精确匹配（比较文件头和文件尾）
+    for candidate_path in candidates:
+        candidate = Path(candidate_path)
+        if not candidate.exists():
+            continue
+        if candidate.resolve() == src_path.resolve():
+            continue
+
+        cand_fp = _get_file_fingerprint(candidate)
+        if not cand_fp:
+            continue
+
+        # 比较文件头50字节和文件尾50字节
+        if (cand_fp.get("head_50") == src_fp.get("head_50") and
+            cand_fp.get("tail_50") == src_fp.get("tail_50")):
+            return candidate
+
+    return None
+
 
 STOP_EVENT = threading.Event()
 
@@ -83,6 +233,29 @@ def _iter_workspace_job_dirs() -> list[Path]:
 
 def _list_job_folders(max_items: int = 200) -> list[str]:
     return [d.name for d in _iter_workspace_job_dirs()[:max_items]]
+
+
+def _list_job_folders_meta(max_items: int = 200) -> list[dict]:
+    """返回文件夹列表，包含名称、修改时间和大小"""
+    job_dirs = list(_iter_workspace_job_dirs())
+    if not job_dirs:
+        return []
+    job_dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    result = []
+    for d in job_dirs[:max_items]:
+        try:
+            mtime = int(d.stat().st_mtime)
+            size = _dir_size_bytes(d)
+            size_mb = size / (1024 * 1024)
+        except OSError:
+            mtime = 0
+            size_mb = 0
+        result.append({
+            "name": d.name,
+            "mtime": mtime,
+            "size": size_mb,
+        })
+    return result
 
 
 def _folder_dropdown_update(current: str | None = None):
@@ -268,14 +441,25 @@ def _pick_funasr_model_for_language(
 
 
 def _has_nvidia_gpu() -> bool:
+    """检测 NVIDIA GPU 是否可用（兼容 WSL2）。"""
     visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
     # 空字符串表示"未设置"（应继续探测硬件），只有明确禁用值才跳过
     if visible in {"-1", "none", "None"}:
         return False
 
+    # 优先检查 torch.cuda（最可靠）
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return True
+    except ImportError:
+        pass
+
+    # 原生 Linux 路径检查
     if os.path.exists("/dev/nvidiactl") or os.path.exists("/proc/driver/nvidia"):
         return True
 
+    # nvidia-smi fallback（WSL2 兼容）
     try:
         result = subprocess.run(
             ["nvidia-smi", "-L"],
@@ -343,6 +527,7 @@ def _prune_temp_video_dir(max_items: int = TEMP_VIDEO_KEEP_COUNT):
             pass
 
 
+
 def _stage_source_media_to_temp_video(input_path: str, preferred_name: str | None = None) -> str:
     src = Path(input_path)
     ext = src.suffix.lower()
@@ -357,6 +542,16 @@ def _stage_source_media_to_temp_video(input_path: str, preferred_name: str | Non
             pass
         _prune_temp_video_dir()
         return str(src)
+
+    # 检查是否已存在相同文件
+    duplicate = _find_duplicate_file(src, TEMP_VIDEO_DIR)
+    if duplicate:
+        try:
+            duplicate.touch()  # 更新访问时间
+        except OSError:
+            pass
+        _prune_temp_video_dir()
+        return str(duplicate)
 
     target = _unique_file_path(TEMP_VIDEO_DIR, preferred_name or src.name)
     if src.exists():

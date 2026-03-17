@@ -1,228 +1,231 @@
 # video2text
 
-video2text 是一个运行在 Linux 上的 FastAPI WebUI，用于把本地或在线视频/音频转换为字幕与纯文本，并支持可选翻译。
+视频/音频转字幕工具，支持本地文件和在线 URL，基于 FunASR（Paraformer）或 faster-whisper 双后端。
 
-**最新版本**: v0.2.1
+**版本**: v0.2.2
 
-### 最近修复（v0.2.1）
+## 功能特性
 
-- 🔧 **GPU 检测修复**：修复 `CUDA_VISIBLE_DEVICES` 未设置时无法检测 GPU 的问题
-- 🔧 **URL 下载修复**：修复下载视频后历史列表选择失败导致转录 400 错误的问题  
-- 🔧 **systemd 配置修复**：修正 `video2text.service` 的 `StartLimitIntervalSec` 位置
+- **双识别后端**：FunASR（Paraformer，中文精度高）/ faster-whisper（多语言）
+- **URL 下载**：通过 yt-dlp 下载在线视频并自动转录
+- **自动字幕优先**：若平台有自动字幕可优先导入跳过 ASR
+- **翻译功能**：基于 OpenAI 兼容接口
+- **GPU 加速**：支持 NVIDIA GPU（Pascal 及以上）、Intel GPU（仅 FunASR）
+- **外部 API**：提供 `/api/external/process` 统一接口
+- **智能去重**：上传相同内容的视频/音频自动复用缓存，节省存储空间
 
-## 当前能力确认
+## 快速开始
 
-是的，当前项目可以从局域网直接访问，并支持解析本地与在线音视频：
+### 方式一：Docker 部署（推荐）
 
-- 局域网访问：服务默认监听 `0.0.0.0`（见 `main.sh`），可通过 `http://<服务器IP>:7881` 或 `https://<服务器IP>:7881` 访问。
-- 本地音视频：主页支持上传本地 `video/*, audio/*` 文件并转录。
-- 在线音视频：支持在主页输入 URL，通过 `yt-dlp` 下载后自动转录；若平台有自动字幕可优先导入并跳过 ASR。
-
-说明：若局域网无法访问，通常是服务器防火墙或路由策略未放行 `7881` 端口。
-
-## 功能概览
-
-- 双识别后端：`FunASR（Paraformer）`、`faster-whisper`
-- URL 下载：`/api/download_url` + `yt-dlp`
-- 自动字幕优先：可配置默认字幕优先项（`AUTO_SUBTITLE_LANG`）
-- 任务进度：百分比、预计剩余时间、步骤状态
-- 翻译功能：基于 OpenAI 兼容接口（配置模型页面维护）
-- 历史管理：`workspace/` 任务目录浏览与文件下载
-
-## 环境要求
-
-- Linux（推荐 Ubuntu 20.04/22.04/24.04）
-- Python 3.12
-- ffmpeg
-- 可选 NVIDIA GPU（无 GPU 也可运行）
-- `yt-dlp`
-- OpenAI 兼容翻译服务（可选）
-
-## 一、本机安装与启动
-
-### 1. 自动安装
+**前置条件**：已安装 Docker
 
 ```bash
+# 下载项目
+git clone <repo_url> /path/to/video2text
+cd /path/to/video2text
+
+# CPU 版（默认）
+bash docker-install.sh cpu
+
+# GPU 版（需要 NVIDIA GPU + Container Toolkit）
+bash docker-install.sh gpu
+
+# 或本地构建
+bash docker-install.sh build cpu
+bash docker-install.sh build gpu
+```
+
+安装完成后按提示命令启动服务，访问 `http://<IP>:7881`
+
+### 方式二：本机安装
+
+**前置条件**：Linux（Ubuntu 20.04/22.04/24.04）、Python 3.12、ffmpeg
+
+```bash
+# 克隆并安装
 git clone <repo_url> /path/to/video2text
 cd /path/to/video2text
 bash install.sh
+
+# 启动
+./main.sh auto   # 自动选择 http/https
+./main.sh http   # 强制 HTTP
+./main.sh https  # 强制 HTTPS
 ```
 
-### 2. 启动
+**可选**：注册为 systemd 服务
 
 ```bash
-cd /path/to/video2text
-chmod +x main.sh
-
-./main.sh auto
-# 或
-./main.sh http
-./main.sh https
+SETUP_SYSTEMD=1 bash install.sh
+sudo systemctl status video2text
 ```
 
-默认端口：`7881`
+## 镜像说明
 
-### 3. systemd 服务（可选）
+**预置模型**（镜像已包含，首次启动即可使用）：
+- `paraformer-zh` - FunASR 中文 Paraformer（推荐中文识别）
+- `iic/SenseVoiceSmall` - SenseVoice 小模型
+- `faster-whisper small` - Whisper small 模型
 
-```bash
-sudo cp video2text.service /etc/systemd/system/video2text.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now video2text
-```
+**按需下载**（首次使用时自动下载）：
+- 其他 FunASR 模型（paraformer-en、large 等）
+- 其他 Whisper 模型（medium、large-v3 等）
 
-常用检查：
+**镜像体积**：
+- CPU 版：约 2.3 GB（含预置模型约 1 GB）
+- GPU 版：约 3.5 GB（含预置模型约 1 GB）
 
-```bash
-systemctl status --no-pager video2text.service
-journalctl -u video2text -f
-```
+**模型缓存**：
+- 通过 volume 持久化，重启容器无需重新下载
+- FunASR 模型 → `~/.cache/modelscope`
+- Whisper 模型 → `~/.cache/huggingface`
 
-## 二、Docker 部署教程（安装教程）
+## Docker 详细说明
 
-当前仓库提供完整 Docker 方案：`Dockerfile` + `docker-compose.yml`。
-
-### 1. 准备配置
+### docker compose 启动
 
 ```bash
 cd /path/to/video2text
 cp .env.example .env
+# 编辑 .env 配置
+
+# CPU 版
+docker compose --profile cpu up -d --build
+
+# GPU 版
+docker compose --profile gpu up -d --build
 ```
 
-按需修改 `.env`（至少确认端口和默认后端）。
+### docker run 启动
 
-### 2. 使用 docker compose 启动（推荐）
+**CPU 版**：
 
 ```bash
-docker compose up -d --build
-```
-
-查看状态与日志：
-
-```bash
-docker compose ps
-docker compose logs -f video2text
-```
-
-停止与清理：
-
-```bash
-docker compose down
-```
-
-### 3. 访问地址
-
-- 本机：`http://127.0.0.1:7881`
-- 局域网：`http://<服务器IP>:7881`
-
-### 4. GPU 启用说明
-
-在宿主机安装 NVIDIA 驱动和 NVIDIA Container Toolkit 后，可在 `docker-compose.yml` 中启用：
-
-```yaml
-# gpus: all
-```
-
-然后重建：
-
-```bash
-docker compose up -d --build
-```
-
-### 5. docker run（可选）
-
-```bash
-docker build -t video2text:cu121 .
+docker build -f Dockerfile.cpu -t video2text:cpu .
 
 docker run -d \
-  --name video2text \
+  --name video2text-cpu \
+  --restart unless-stopped \
   -p 7881:7881 \
-  -e HOST=0.0.0.0 \
-  -e PORT=7881 \
-  -e SSL_MODE=http \
+  -v $(pwd)/workspace:/app/workspace \
+  -v $(pwd)/.env:/app/.env \
+  video2text:cpu
+```
+
+**GPU 版**：
+
+```bash
+docker build -f Dockerfile -t video2text:cu121 .
+
+docker run -d \
+  --name video2text-gpu \
+  --gpus all \
+  --restart unless-stopped \
+  -p 7881:7881 \
   -v $(pwd)/workspace:/app/workspace \
   -v $(pwd)/.env:/app/.env \
   video2text:cu121
 ```
 
-### 6. 发布到 Docker Hub（可选）
+## 硬件加速
+
+### NVIDIA GPU
+
+- 架构要求：Pascal 及以上（compute capability >= 6.0）
+- 宿主机需安装：NVIDIA 驱动 + NVIDIA Container Toolkit
+
+检查命令：
 
 ```bash
-# 1) 登录（首次）
-docker login
-
-# 2) 构建与打标签
-docker build -t <dockerhub_user>/video2text:cu121 .
-docker tag <dockerhub_user>/video2text:cu121 <dockerhub_user>/video2text:latest
-
-# 3) 推送
-docker push <dockerhub_user>/video2text:cu121
-docker push <dockerhub_user>/video2text:latest
+nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader
 ```
 
-## 三、配置说明（.env）
+### Intel GPU（仅 FunASR 后端）
 
-核心配置项：
+FunASR 支持 Intel 核显/Arc 显卡加速，faster-whisper 不支持。
 
-- `APP_PORT`：服务端口（默认 `7881`）
-- `BROWSER_DEBUG_PORT`：Win11 浏览器调试端口（默认 `9222`）
-- `DEFAULT_BACKEND`：默认识别后端
-- `DEFAULT_FUNASR_MODEL`：默认 FunASR 模型
-- `DEFAULT_WHISPER_MODEL`：默认 Whisper 模型
-- `AUTO_SUBTITLE_LANG`：默认字幕优先项（`zh`/`none`/`en`/`ja`/`ko`/`es`/`fr`/`de`/`ru`/`pt`/`ar`/`hi`）
-- `ONLINE_MODEL_*`：在线模型配置组
+**本机安装配置**：
 
-安全建议：`.env` 含密钥，禁止提交到仓库。
+```bash
+# 1. 安装 Intel oneAPI Base Toolkit
+wget https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB
+sudo apt-key add GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB
+echo "deb https://apt.repos.intel.com/oneapi all main" | sudo tee /etc/apt/sources.list.d/oneAPI.list
+sudo apt update && sudo apt install -y intel-oneapi-base-toolkit
 
-## 四、简单使用教程
+# 2. 安装 Intel Extension for PyTorch
+source /opt/intel/oneapi/setvars.sh
+pip install intel-extension-for-pytorch
+
+# 3. 在 .env 中启用
+echo "PREFER_INTEL_GPU=1" >> .env
+```
+
+**验证**：
+
+```bash
+python3 -c "import torch; print('XPU available:', torch.xpu.is_available())"
+```
+
+**FFmpeg 硬件加速**：
+
+FFmpeg 自动检测 Intel QSV（需 `/dev/dri/renderD128` 存在），优先级：
+1. Intel QSV
+2. NVIDIA CUDA
+3. CPU 回退
+
+## 配置说明
+
+核心配置项（`.env` 文件）：
+
+| 配置项 | 说明 | 默认值 |
+|--------|------|--------|
+| `APP_PORT` | 服务端口 | `7881` |
+| `DEFAULT_BACKEND` | 默认识别后端 | `FunASR（Paraformer）` |
+| `DEFAULT_FUNASR_MODEL` | FunASR 模型 | `paraformer-zh` |
+| `DEFAULT_WHISPER_MODEL` | Whisper 模型 | `medium` |
+| `AUTO_SUBTITLE_LANG` | 字幕优先语言 | `zh` |
+| `FFMPEG_THREADS` | FFmpeg 线程数 | `4` |
+| `FUNASR_BATCH_SIZE_S` | FunASR 批处理秒数 | `300` |
+| `PREFER_INTEL_GPU` | 优先使用 Intel GPU | `0` |
+| `ONLINE_MODEL_*` | 翻译模型配置 | - |
+
+> 安全建议：`.env` 含密钥，禁止提交到版本控制。
+
+## 使用教程
 
 ### 场景 A：本地文件转字幕
 
-1. 打开主页，点击 `上传视频/音频` 选择本地文件。
-2. 选择识别后端与后端模型。
-3. 点击 `开始转录`。
-4. 等待任务完成，查看 `识别文本` 和 `运行日志`。
-5. 下载 `*.srt` 与 `*.txt`（或 ZIP）。
+1. 打开主页，上传视频/音频文件
+2. 选择识别后端与模型
+3. 点击「开始转录」
+4. 下载 `.srt` / `.txt` 文件
 
 ### 场景 B：在线视频转字幕
 
-1. 在 `视频URL` 输入链接。
-2. 点击 `下载视频`。
-3. 若检测到平台自动字幕，会优先导入并跳过 ASR。
-4. 未命中自动字幕时，自动进入语音识别流程。
-5. 完成后下载结果文件。
+1. 在「视频URL」输入链接
+2. 点击「下载视频」
+3. 自动检测字幕或进入语音识别
+4. 下载结果
 
 ### 场景 C：翻译字幕
 
-1. 在 `配置模型` 页面配置可用翻译模型（base_url/api_key）。
-2. 回到主页，选择目标语言。
-3. 点击 `翻译`。
-4. 下载 `*.<lang>.srt` 与 `*.<lang>.txt`。
+1. 在「配置模型」页面配置翻译 API
+2. 回到主页选择目标语言
+3. 点击「翻译」
+4. 下载翻译后的字幕
 
-## 五、第三方 HTTP 调用（统一 API）
+## 外部 API
 
-已提供统一 FastAPI 接口：`POST /api/external/process`
+### POST /api/external/process
 
-支持输入：
+支持输入类型：
+- `source_type=base64`：本地音视频 base64
+- `source_type=url`：在线视频 URL
+- `source_type=history`：历史媒体路径
 
-- `source_type=base64`：传本地音视频 base64
-- `source_type=url`：传在线视频 URL
-- `source_type=history`：传历史媒体相对路径
-
-支持参数：
-
-- 识别：`backend`、`funasr_model`、`whisper_model`、`device`、`language`
-- 字幕优先：`auto_subtitle_lang`（`zh`/`none`/`en`/`ja`/`ko`/`es`/`fr`/`de`/`ru`/`pt`/`ar`/`hi`）
-- 翻译：`target_lang`（传 `none` 表示不翻译）、`online_profile`、`online_model`
-- 输出：`output_mode`（`binary`/`base64`/`json`）
-- 强制识别：`force_asr`（`true` 时即使 URL 有自动字幕也走 ASR）
-
-返回输出：
-
-- `output_mode=binary`：直接返回 `application/zip`
-- `output_mode=base64`：返回 JSON，含 `zip_base64`
-- `output_mode=json`：返回 JSON 元数据和 `download_path`
-
-### 1. 解析 URL 并直接返回 ZIP（二进制）
+示例（URL 转 ZIP）：
 
 ```bash
 curl -X POST "http://127.0.0.1:7881/api/external/process" \
@@ -231,49 +234,63 @@ curl -X POST "http://127.0.0.1:7881/api/external/process" \
     "source_type": "url",
     "url": "https://www.youtube.com/watch?v=xxxx",
     "backend": "FunASR（Paraformer）",
-    "funasr_model": "paraformer-zh ⭐ 普通话精度推荐",
     "auto_subtitle_lang": "zh",
-    "target_lang": "zh",
     "output_mode": "binary"
   }' \
   --output result.zip
 ```
 
-### 2. 解析 base64 本地媒体并返回 ZIP(base64)
+## 目录结构
 
-```bash
-curl -X POST "http://127.0.0.1:7881/api/external/process" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "source_type": "base64",
-    "filename": "demo.mp4",
-    "media_base64": "<BASE64_STRING>",
-    "backend": "faster-whisper（多语言）",
-    "whisper_model": "medium",
-    "auto_subtitle_lang": "none",
-    "target_lang": "none",
-    "output_mode": "base64"
-  }'
 ```
-
-## 六、目录结构
-
-```text
 video2text/
-├── fastapi_app.py
-├── main.py
-├── main.sh
-├── docker-compose.yml
-├── Dockerfile
-├── video2text.service
+├── Dockerfile              # GPU 版（cu121）
+├── Dockerfile.cpu          # CPU 版
+├── docker-compose.yml      # Docker Compose 配置
+├── docker-install.sh       # Docker 一键安装脚本
+├── docker-entrypoint.sh    # Docker 入口脚本
+├── install.sh              # 本机安装脚本
+├── pyproject.toml          # Python 项目配置
+├── main.py / main.sh       # 启动入口
+├── fastapi_app.py          # FastAPI 应用
 ├── backend/
+│   ├── funasr_backend.py   # FunASR 后端
+│   └── whisper_backend.py  # faster-whisper 后端
 ├── utils/
-└── workspace/
+│   ├── audio.py            # 音频处理
+│   ├── subtitle.py         # 字幕格式化
+│   └── online_models.py    # 在线模型配置
+├── scripts/
+│   └── download_models.py  # 模型预下载脚本
+└── workspace/              # 任务输出目录
 ```
 
-## 七、常见问题
+## 常见问题
 
-- 无法局域网访问：检查防火墙、云安全组、路由 ACL，确认 `7881` 已放行。
-- URL 下载失败：确认 `yt-dlp` 可用且网络可达目标站点。
-- GPU 未生效：检查宿主机 `nvidia-smi` 和容器 GPU 暴露配置。
-- 翻译失败：检查 `base_url/api_key`、模型名和外网连通性。
+| 问题 | 解决方案 |
+|------|----------|
+| 局域网无法访问 | 检查防火墙/云安全组是否放行 7881 端口 |
+| URL 下载失败 | 确认 yt-dlp 可用且网络可达目标站点 |
+| GPU 未生效 | 检查 `nvidia-smi` 和容器 GPU 配置 |
+| Intel GPU 未生效 | 确认 oneAPI 已安装，检查 `torch.xpu.is_available()` |
+| 翻译失败 | 检查 API base_url/api_key 和网络连通性 |
+| 模型下载慢 | 使用国内镜像或配置代理 |
+
+## 更新日志
+
+### v0.2.2
+- ✨ 智能文件去重：上传相同内容的视频/音频自动复用缓存
+  - 基于文件大小 + 文件头50字节 + 文件尾50字节判断
+  - 使用 SQLite 存储文件指纹，不依赖文件名
+- 🔧 Docker 拆分双镜像：CPU 版与 GPU 版独立构建
+
+### v0.2.1
+- 🔧 GPU 检测修复：修复 `CUDA_VISIBLE_DEVICES` 未设置时无法检测 GPU
+- 🔧 URL 下载修复：修复下载视频后历史列表选择失败问题
+- 🔧 systemd 配置修复：修正 `video2text.service` 配置
+- ✨ Docker 优化：多阶段构建，预置核心模型
+- ✨ 新增 `docker-install.sh` 一键安装脚本
+
+## 许可证
+
+MIT
