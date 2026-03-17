@@ -3,11 +3,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: video2text:cu121
+    image: adolyming/video2text:latest
     container_name: video2text
     restart: unless-stopped
-    # 如果宿主机已安装 NVIDIA Container Toolkit，可启用：
-    # gpus: all
     ports:
       - "7881:7881"
     environment:
@@ -20,6 +18,14 @@ services:
       GRADIO_ANALYTICS_ENABLED: "false"
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
+    # GPU 支持：有 GPU 则使用，无 GPU 则自动回退 CPU
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
     volumes:
       - ./workspace:/app/workspace
       - ./.env:/app/.env

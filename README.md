@@ -338,8 +338,7 @@ curl -X POST "http://127.0.0.1:7881/api/external/process" \
 
 ```
 video2text/
-├── Dockerfile              # GPU 版（cu121）
-├── Dockerfile.cpu          # CPU 版
+├── Dockerfile              # Docker 镜像（支持 GPU 和 CPU）
 ├── docker-compose.yml      # Docker Compose 配置
 ├── docker-install.sh       # Docker 一键安装脚本
 ├── docker-entrypoint.sh    # Docker 入口脚本

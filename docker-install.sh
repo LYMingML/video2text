@@ -3,11 +3,9 @@
 # 适用于已安装 Docker 的 Linux 服务器
 #
 # 用法：
-#   bash docker-install.sh              # 交互式安装（默认 CPU 版）
-#   bash docker-install.sh cpu          # 直接安装 CPU 版
-#   bash docker-install.sh gpu          # 直接安装 GPU 版
-#   bash docker-install.sh build cpu    # 本地构建 CPU 版
-#   bash docker-install.sh build gpu    # 本地构建 GPU 版
+#   bash docker-install.sh              # 拉取并安装
+#   bash docker-install.sh build        # 本地构建镜像（需在项目目录下）
+#   bash docker-install.sh help         # 显示帮助
 #
 # 环境变量：
 #   IMAGE_REGISTRY=ghcr.io/xxx  # 指定镜像仓库（可选）
@@ -38,28 +36,24 @@ show_help() {
 video2text Docker 安装脚本
 
 用法:
-  bash docker-install.sh [命令] [选项]
+  bash docker-install.sh [命令]
 
 命令:
-  cpu       安装 CPU 版本（默认）
-  gpu       安装 GPU 版本（需要 NVIDIA GPU + Container Toolkit）
   build     本地构建镜像（需在项目目录下）
   help      显示此帮助信息
 
-选项:
-  cpu/gpu   选择版本类型
-
 示例:
-  bash docker-install.sh              # 交互式安装
-  bash docker-install.sh cpu          # 安装 CPU 版
-  bash docker-install.sh gpu          # 安装 GPU 版
-  bash docker-install.sh build cpu    # 本地构建 CPU 版
-  bash docker-install.sh build gpu    # 本地构建 GPU 版
+  bash docker-install.sh              # 拉取镜像并安装
+  bash docker-install.sh build        # 本地构建镜像
 
 环境变量:
   IMAGE_REGISTRY  镜像仓库地址（如 ghcr.io/user/）
   DATA_DIR        数据存储目录（默认 ./data）
   APP_PORT        服务端口（默认 7881）
+
+注意:
+  - 镜像同时支持 GPU 和 CPU，无 GPU 时自动回退 CPU
+  - 有 GPU 时需安装 NVIDIA Container Toolkit
 
 EOF
     exit 0
@@ -85,7 +79,7 @@ check_gpu() {
         log "检测到 GPU: $GPU_NAME"
         return 0
     else
-        warn "未检测到 NVIDIA GPU 或驱动未安装"
+        info "未检测到 NVIDIA GPU，将使用 CPU 模式"
         return 1
     fi
 }
@@ -128,21 +122,14 @@ EOF
 
 # ──────────────────────────── 构建镜像 ─────────────────────────────
 build_image() {
-    local variant="$1"
-    local dockerfile="Dockerfile"
     local tag="${IMAGE_NAME}:latest"
 
-    if [[ "$variant" == "cpu" && -f "Dockerfile.cpu" ]]; then
-        dockerfile="Dockerfile.cpu"
-        tag="${IMAGE_NAME}:cpu"
+    if [[ ! -f "Dockerfile" ]]; then
+        err "找不到 Dockerfile，请在项目目录下运行此脚本"
     fi
 
-    if [[ ! -f "$dockerfile" ]]; then
-        err "找不到 $dockerfile，请在项目目录下运行此脚本"
-    fi
-
-    info "构建镜像: $tag (使用 $dockerfile)"
-    docker build -f "$dockerfile" -t "$tag" .
+    info "构建镜像: $tag"
+    docker build -t "$tag" .
     log "镜像构建完成: $tag"
 }
 
@@ -157,14 +144,14 @@ pull_image() {
         return 0
     else
         warn "镜像拉取失败，尝试本地构建..."
-        build_image "$1"
+        build_image
         return $?
     fi
 }
 
 # ──────────────────────────── 生成启动命令 ─────────────────────────────
 print_run_commands() {
-    local variant="$1"
+    local has_gpu="$1"
     local container_name="video2text"
     local image_tag="${IMAGE_NAME}:latest"
 
@@ -180,7 +167,7 @@ print_run_commands() {
     echo -e "  ${YELLOW}启动命令:${NC}"
     echo ""
 
-    if [[ "$variant" == "gpu" ]]; then
+    if [[ "$has_gpu" == "true" ]]; then
         cat << EOF
   docker run -d \\
     --name $container_name \\
@@ -228,30 +215,9 @@ EOF
     echo ""
 }
 
-# ──────────────────────────── 使用 docker compose ─────────────────────────────
-print_compose_command() {
-    local variant="$1"
-
-    echo ""
-    echo -e "  ${YELLOW}或使用 docker compose:${NC}"
-    echo ""
-    echo -e "    ${CYAN}mkdir -p $DATA_DIR && cd $DATA_DIR${NC}"
-    echo -e "    ${CYAN}cp /path/to/video2text/.env.example .env${NC}"
-    echo -e "    ${CYAN}cp /path/to/video2text/docker-compose.yml .${NC}"
-    echo ""
-
-    if [[ "$variant" == "gpu" ]]; then
-        echo -e "    ${CYAN}docker compose --profile gpu up -d${NC}"
-    else
-        echo -e "    ${CYAN}docker compose --profile cpu up -d${NC}"
-    fi
-    echo ""
-}
-
 # ──────────────────────────── 主流程 ─────────────────────────────
 main() {
     local action="${1:-}"
-    local variant="${2:-}"
 
     # 显示帮助
     if [[ "$action" == "help" || "$action" == "-h" || "$action" == "--help" ]]; then
@@ -267,43 +233,24 @@ main() {
 
     check_docker
 
-    # 解析参数
-    if [[ "$action" == "build" ]]; then
-        variant="${variant:-cpu}"
-        [[ "$variant" != "cpu" && "$variant" != "gpu" ]] && err "版本类型必须是 cpu 或 gpu"
-        create_env_file
-        build_image "$variant"
-        print_run_commands "$variant"
-        exit 0
-    fi
-
-    # 确定 variant
-    if [[ -z "$variant" ]]; then
-        variant="${action:-cpu}"
-    fi
-
-    if [[ "$variant" != "cpu" && "$variant" != "gpu" ]]; then
-        variant="cpu"
-    fi
-
-    # GPU 检查
-    if [[ "$variant" == "gpu" ]]; then
-        if ! check_gpu; then
-            warn "GPU 检测失败，继续安装 GPU 版但可能无法使用 GPU 加速"
-        fi
+    local has_gpu="false"
+    if check_gpu; then
+        has_gpu="true"
     fi
 
     create_env_file
 
-    # 如果在项目目录下且有 Dockerfile，优先构建
-    if [[ -f "Dockerfile.cpu" && -f "Dockerfile" ]]; then
+    # 解析参数
+    if [[ "$action" == "build" ]]; then
+        build_image
+    elif [[ -f "Dockerfile" ]]; then
         info "检测到项目源码，使用本地构建..."
-        build_image "$variant"
+        build_image
     else
-        pull_image "$variant"
+        pull_image
     fi
 
-    print_run_commands "$variant"
+    print_run_commands "$has_gpu"
 }
 
 main "$@"
