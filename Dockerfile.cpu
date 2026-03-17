@@ -1,4 +1,4 @@
-# video2text CPU Dockerfile (v0.2.1)
+# video2text CPU Dockerfile (v0.2.3)
 # Minimal image variant without CUDA runtime packages.
 # Multi-stage build with pre-downloaded core models
 

@@ -3,7 +3,7 @@
 set -euo pipefail
 
 USERNAME="${DOCKER_HUB_USER:-lym}"
-VERSION="${1:-0.2.1}"
+VERSION="${1:-0.2.3}"
 
 echo "=========================================="
 echo "  video2text Docker 镜像构建与推送"
