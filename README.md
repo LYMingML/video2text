@@ -56,11 +56,11 @@ docker run -d \
 
 ### 方式二：本机安装
 
-**前置条件**：Linux（Ubuntu 20.04/22.04/24.04）、Python 3.12、ffmpeg
+**前置条件**：Linux（Ubuntu 20.04/22.04/24.04）、Python 3.10+、ffmpeg
 
 ```bash
 # 克隆并安装
-git clone <repo_url> /path/to/video2text
+git clone https://github.com/LYMingML/video2text.git /path/to/video2text
 cd /path/to/video2text
 bash install.sh
 
@@ -116,6 +116,22 @@ docker --version
 docker compose version
 ```
 
+### 国内镜像加速（推荐）
+
+配置 Docker 使用国内镜像源加速拉取：
+
+```bash
+sudo tee /etc/docker/daemon.json << 'EOF'
+{
+  "registry-mirrors": [
+    "https://docker.1ms.run",
+    "https://docker.xuanyuan.me"
+  ]
+}
+EOF
+sudo systemctl restart docker
+```
+
 ### GPU 版额外要求
 
 如需 GPU 加速，需安装 NVIDIA Container Toolkit：
@@ -128,8 +144,7 @@ curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-contai
   sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
 
 # 安装
-sudo apt-get update
-sudo apt-get install -y nvidia-container-toolkit
+sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
 sudo nvidia-ctk runtime configure --runtime=docker
 sudo systemctl restart docker
 
@@ -137,106 +152,37 @@ sudo systemctl restart docker
 sudo docker run --rm --gpus all nvidia/cuda:12.1-base nvidia-smi
 ```
 
-## Docker 代理设置（Proxy）
+### 代理配置（可选）
 
-国内网络环境下，建议配置代理以加速镜像拉取和模型下载。
-
-### 方式一：Docker Daemon 代理（推荐）
-
-配置 Docker 守护进程使用代理，对所有 `docker pull` 生效：
+如需代理访问外网，可通过环境变量配置：
 
 ```bash
-# 创建 systemd 配置目录
+# Docker Daemon 代理（对所有 docker pull 生效）
 sudo mkdir -p /etc/systemd/system/docker.service.d
-
-# 写入代理配置（替换为你的代理地址）
 sudo tee /etc/systemd/system/docker.service.d/proxy.conf << 'EOF'
 [Service]
 Environment="HTTP_PROXY=http://127.0.0.1:7890"
 Environment="HTTPS_PROXY=http://127.0.0.1:7890"
-Environment="NO_PROXY=localhost,127.0.0.1,*.cn,mirrors.tuna.tsinghua.edu.cn"
+Environment="NO_PROXY=localhost,127.0.0.1,*.cn"
 EOF
+sudo systemctl daemon-reload && sudo systemctl restart docker
 
-# 重载并重启
-sudo systemctl daemon-reload
-sudo systemctl restart docker
-
-# 验证
-sudo systemctl show --property=Environment docker
-```
-
-### 方式二：Docker Build 代理
-
-构建镜像时指定代理参数：
-
-```bash
-# 构建时传入代理
-docker build \
-  --build-arg HTTP_PROXY=http://127.0.0.1:7890 \
-  --build-arg HTTPS_PROXY=http://127.0.0.1:7890 \
-  -f Dockerfile -t video2text:cu121 .
-```
-
-或修改 Dockerfile 添加 ARG（可选）：
-
-```dockerfile
-ARG HTTP_PROXY
-ARG HTTPS_PROXY
-ENV http_proxy=$HTTP_PROXY \
-    https_proxy=$HTTPS_PROXY
-```
-
-### 方式三：Docker Compose 代理
-
-在 `docker-compose.yml` 中为容器配置代理环境变量：
-
-```yaml
-services:
-  video2text-gpu:
-    # ...
-    environment:
-      - HTTP_PROXY=http://host.docker.internal:7890
-      - HTTPS_PROXY=http://host.docker.internal:7890
-      - NO_PROXY=localhost,127.0.0.1
-```
-
-> **注意**：`host.docker.internal` 在 Linux 上需要添加 `--add-host` 参数，或使用宿主机 IP。
-
-### 方式四：运行时代理
-
-`docker run` 时通过 `-e` 参数指定：
-
-```bash
-docker run -d \
-  --name video2text-gpu \
-  --gpus all \
+# 容器运行时代理（用于模型下载）
+docker run -d --name video2text \
   -e HTTP_PROXY=http://172.17.0.1:7890 \
   -e HTTPS_PROXY=http://172.17.0.1:7890 \
-  -e NO_PROXY=localhost,127.0.0.1,*.cn \
-  ... \
-  video2text:cu121
+  ...
 ```
-
-> `172.17.0.1` 是 Docker 默认网桥的网关 IP，可通过 `docker network inspect bridge` 查看。
-
-### 常用代理配置汇总
-
-| 场景 | 配置方式 |
-|------|----------|
-| 拉取镜像 | Docker Daemon 代理 |
-| 构建镜像 | `--build-arg` 或 Dockerfile ARG |
-| 容器内下载模型 | 容器环境变量 `HTTP_PROXY` |
-| 全局生效 | Docker Daemon 代理 + 容器环境变量 |
 
 ## Docker 详细说明
 
-### docker run 启动（推荐）
+### docker run 启动
 
 ```bash
 # 拉取镜像
 docker pull adolyming/video2text:latest
 
-# GPU 版启动（需要 NVIDIA GPU + Container Toolkit）
+# GPU 版启动
 docker run -d \
   --name video2text \
   --gpus all \
@@ -247,7 +193,7 @@ docker run -d \
   -v video2text-cache:/app/.cache \
   adolyming/video2text:latest
 
-# CPU 版启动
+# CPU 版启动（去掉 --gpus all）
 docker run -d \
   --name video2text \
   --restart unless-stopped \
@@ -261,46 +207,19 @@ docker run -d \
 ### docker compose 启动
 
 ```bash
-# 下载 docker-compose.yml
 curl -fsSL https://raw.githubusercontent.com/LYMingML/video2text/master/docker-compose.yml -o docker-compose.yml
-
-# 下载配置文件
 curl -fsSL https://raw.githubusercontent.com/LYMingML/video2text/master/.env.example -o .env
 # 编辑 .env 配置
 
-# GPU 版
 docker compose up -d
-
-# 或使用 --profile 指定
-docker compose --profile gpu up -d
-```
-
-### 本地构建（可选）
-
-如需自定义构建：
-
-```bash
-git clone https://github.com/LYMingML/video2text.git
-cd video2text
-
-# GPU 版
-docker build -f Dockerfile -t adolyming/video2text:latest .
-
-# CPU 版
-docker build -f Dockerfile.cpu -t adolyming/video2text:cpu .
 ```
 
 ### Docker 清理
 
 ```bash
-# 停止并删除容器
 docker rm -f video2text
-
-# 删除镜像
 docker rmi adolyming/video2text:latest
-
-# 清理未使用的资源（可选）
-docker system prune -f
+docker system prune -f  # 清理未使用资源
 ```
 
 ## 硬件加速
@@ -454,10 +373,9 @@ video2text/
 ## 更新日志
 
 ### v0.2.3
-- 📖 文档完善：添加 Docker 安装教程和代理配置指南
-- 📖 添加 NVIDIA Container Toolkit 安装步骤
+- 📖 文档重构：精简 Docker 教程，添加国内镜像源和代理配置
 - 📖 统一使用 Docker Hub 镜像 `adolyming/video2text:latest`
-- 📖 添加 Docker 清理命令说明
+- 📖 添加 NVIDIA Container Toolkit 安装步骤
 
 ### v0.2.2
 - ✨ 智能文件去重：上传相同内容的视频/音频自动复用缓存
