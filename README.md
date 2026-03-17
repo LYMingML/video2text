@@ -21,22 +21,38 @@
 **前置条件**：已安装 Docker
 
 ```bash
-# 下载项目
-git clone <repo_url> /path/to/video2text
-cd /path/to/video2text
+# 拉取镜像
+docker pull adolyming/video2text:latest
 
-# CPU 版（默认）
-bash docker-install.sh cpu
+# 创建数据目录
+mkdir -p ~/video2text-data/workspace
+cd ~/video2text-data
 
-# GPU 版（需要 NVIDIA GPU + Container Toolkit）
-bash docker-install.sh gpu
+# 下载配置文件模板
+curl -fsSL https://raw.githubusercontent.com/LYMingML/video2text/master/.env.example -o .env
+# 编辑 .env 配置
 
-# 或本地构建
-bash docker-install.sh build cpu
-bash docker-install.sh build gpu
+# 启动服务（GPU 版）
+docker run -d \
+  --name video2text \
+  --gpus all \
+  --restart unless-stopped \
+  -p 7881:7881 \
+  -v $(pwd)/workspace:/app/workspace \
+  -v $(pwd)/.env:/app/.env \
+  adolyming/video2text:latest
+
+# 或启动服务（CPU 版，去掉 --gpus all）
+docker run -d \
+  --name video2text \
+  --restart unless-stopped \
+  -p 7881:7881 \
+  -v $(pwd)/workspace:/app/workspace \
+  -v $(pwd)/.env:/app/.env \
+  adolyming/video2text:latest
 ```
 
-安装完成后按提示命令启动服务，访问 `http://<IP>:7881`
+访问 `http://<IP>:7881`
 
 ### 方式二：本机安装
 
@@ -63,6 +79,10 @@ sudo systemctl status video2text
 
 ## 镜像说明
 
+**Docker Hub**：`adolyming/video2text:latest`
+
+> 镜像同时支持 GPU 和 CPU，根据启动参数自动选择。
+
 **预置模型**（镜像已包含，首次启动即可使用）：
 - `paraformer-zh` - FunASR 中文 Paraformer（推荐中文识别）
 - `iic/SenseVoiceSmall` - SenseVoice 小模型
@@ -72,9 +92,7 @@ sudo systemctl status video2text
 - 其他 FunASR 模型（paraformer-en、large 等）
 - 其他 Whisper 模型（medium、large-v3 等）
 
-**镜像体积**：
-- CPU 版：约 2.3 GB（含预置模型约 1 GB）
-- GPU 版：约 3.5 GB（含预置模型约 1 GB）
+**镜像体积**：约 7.6 GB（含预置模型）
 
 **模型缓存**：
 - 通过 volume 持久化，重启容器无需重新下载
@@ -212,61 +230,74 @@ docker run -d \
 
 ## Docker 详细说明
 
-### docker compose 启动
+### docker run 启动（推荐）
 
 ```bash
-cd /path/to/video2text
-cp .env.example .env
-# 编辑 .env 配置
+# 拉取镜像
+docker pull adolyming/video2text:latest
 
-# CPU 版
-docker compose --profile cpu up -d --build
-
-# GPU 版
-docker compose --profile gpu up -d --build
-```
-
-### docker run 启动
-
-**CPU 版**：
-
-```bash
-docker build -f Dockerfile.cpu -t video2text:cpu .
-
+# GPU 版启动（需要 NVIDIA GPU + Container Toolkit）
 docker run -d \
-  --name video2text-cpu \
-  --restart unless-stopped \
-  -p 7881:7881 \
-  -v $(pwd)/workspace:/app/workspace \
-  -v $(pwd)/.env:/app/.env \
-  video2text:cpu
-```
-
-**GPU 版**：
-
-```bash
-docker build -f Dockerfile -t video2text:cu121 .
-
-docker run -d \
-  --name video2text-gpu \
+  --name video2text \
   --gpus all \
   --restart unless-stopped \
   -p 7881:7881 \
   -v $(pwd)/workspace:/app/workspace \
   -v $(pwd)/.env:/app/.env \
-  video2text:cu121
+  -v video2text-cache:/app/.cache \
+  adolyming/video2text:latest
+
+# CPU 版启动
+docker run -d \
+  --name video2text \
+  --restart unless-stopped \
+  -p 7881:7881 \
+  -v $(pwd)/workspace:/app/workspace \
+  -v $(pwd)/.env:/app/.env \
+  -v video2text-cache:/app/.cache \
+  adolyming/video2text:latest
+```
+
+### docker compose 启动
+
+```bash
+# 下载 docker-compose.yml
+curl -fsSL https://raw.githubusercontent.com/LYMingML/video2text/master/docker-compose.yml -o docker-compose.yml
+
+# 下载配置文件
+curl -fsSL https://raw.githubusercontent.com/LYMingML/video2text/master/.env.example -o .env
+# 编辑 .env 配置
+
+# GPU 版
+docker compose up -d
+
+# 或使用 --profile 指定
+docker compose --profile gpu up -d
+```
+
+### 本地构建（可选）
+
+如需自定义构建：
+
+```bash
+git clone https://github.com/LYMingML/video2text.git
+cd video2text
+
+# GPU 版
+docker build -f Dockerfile -t adolyming/video2text:latest .
+
+# CPU 版
+docker build -f Dockerfile.cpu -t adolyming/video2text:cpu .
 ```
 
 ### Docker 清理
 
-如不再使用 Docker 部署，可删除容器和镜像：
-
 ```bash
 # 停止并删除容器
-docker rm -f video2text-gpu video2text-cpu
+docker rm -f video2text
 
 # 删除镜像
-docker rmi video2text:cu121 video2text:cpu
+docker rmi adolyming/video2text:latest
 
 # 清理未使用的资源（可选）
 docker system prune -f
@@ -425,6 +456,7 @@ video2text/
 ### v0.2.3
 - 📖 文档完善：添加 Docker 安装教程和代理配置指南
 - 📖 添加 NVIDIA Container Toolkit 安装步骤
+- 📖 统一使用 Docker Hub 镜像 `adolyming/video2text:latest`
 - 📖 添加 Docker 清理命令说明
 
 ### v0.2.2

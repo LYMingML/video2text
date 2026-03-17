@@ -15,8 +15,8 @@
 set -euo pipefail
 
 # ──────────────────────────── 配置 ─────────────────────────────
-IMAGE_NAME="${IMAGE_REGISTRY:-}video2text"
-VERSION="0.2.1"
+IMAGE_NAME="${IMAGE_REGISTRY:-adolyming/video2text}"
+VERSION="0.2.3"
 PORT="${APP_PORT:-7881}"
 DATA_DIR="${DATA_DIR:-$(pwd)/data}"
 
@@ -129,12 +129,12 @@ EOF
 # ──────────────────────────── 构建镜像 ─────────────────────────────
 build_image() {
     local variant="$1"
-    local dockerfile="Dockerfile.cpu"
-    local tag="${IMAGE_NAME}:cpu"
+    local dockerfile="Dockerfile"
+    local tag="${IMAGE_NAME}:latest"
 
-    if [[ "$variant" == "gpu" ]]; then
-        dockerfile="Dockerfile"
-        tag="${IMAGE_NAME}:cu121"
+    if [[ "$variant" == "cpu" && -f "Dockerfile.cpu" ]]; then
+        dockerfile="Dockerfile.cpu"
+        tag="${IMAGE_NAME}:cpu"
     fi
 
     if [[ ! -f "$dockerfile" ]]; then
@@ -148,12 +148,7 @@ build_image() {
 
 # ──────────────────────────── 拉取镜像 ─────────────────────────────
 pull_image() {
-    local variant="$1"
-    local tag="${IMAGE_NAME}:cpu"
-
-    if [[ "$variant" == "gpu" ]]; then
-        tag="${IMAGE_NAME}:cu121"
-    fi
+    local tag="${IMAGE_NAME}:latest"
 
     info "拉取镜像: $tag"
 
@@ -162,7 +157,7 @@ pull_image() {
         return 0
     else
         warn "镜像拉取失败，尝试本地构建..."
-        build_image "$variant"
+        build_image "$1"
         return $?
     fi
 }
@@ -170,12 +165,8 @@ pull_image() {
 # ──────────────────────────── 生成启动命令 ─────────────────────────────
 print_run_commands() {
     local variant="$1"
-    local container_name="video2text-${variant}"
-    local image_tag="${IMAGE_NAME}:${variant}"
-
-    if [[ "$variant" == "gpu" ]]; then
-        image_tag="${IMAGE_NAME}:cu121"
-    fi
+    local container_name="video2text"
+    local image_tag="${IMAGE_NAME}:latest"
 
     echo ""
     echo -e "${GREEN}╔══════════════════════════════════════╗${NC}"
