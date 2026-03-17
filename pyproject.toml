@@ -1,9 +1,9 @@
 [project]
 name = "video2text"
-version = "0.2.1"
+version = "0.2.3"
 description = "视频转文本字幕工具，支持 FunASR Paraformer / faster-whisper 双后端，NVIDIA GPU 加速"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 dependencies = [
     # Web UI
     "gradio>=4.0",
@@ -19,6 +19,7 @@ dependencies = [
     "addict>=2.4.0",
     # 音视频处理
     "ffmpeg-python>=0.2.0",
+    "yt-dlp>=2024.8.6",
 ]
 # ⚠️  Tesla P4 / Pascal GPU (CUDA Compute 6.1) 需要固定 torch 版本：
 #   uv pip install "torch==2.3.1+cu121" "torchaudio==2.3.1+cu121" \
@@ -31,3 +32,23 @@ video2text = "main:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend", "utils"]
+include = [
+    "main.py",
+    "fastapi_app.py",
+    "main.sh",
+    ".env.example",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "backend/**",
+    "utils/**",
+    "main.py",
+    "fastapi_app.py",
+    "main.sh",
+    "README.md",
+    "pyproject.toml",
+]

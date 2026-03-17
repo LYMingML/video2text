@@ -2,7 +2,7 @@
 
 视频/音频转字幕工具，支持本地文件和在线 URL，基于 FunASR（Paraformer）或 faster-whisper 双后端。
 
-**版本**: v0.2.2
+**版本**: v0.2.3
 
 ## 功能特性
 
@@ -81,6 +81,135 @@ sudo systemctl status video2text
 - FunASR 模型 → `~/.cache/modelscope`
 - Whisper 模型 → `~/.cache/huggingface`
 
+## Docker 安装教程
+
+### 前置条件
+
+安装 Docker 和 Docker Compose：
+
+```bash
+# Ubuntu/Debian
+curl -fsSL https://get.docker.com | sudo sh
+sudo usermod -aG docker $USER
+# 重新登录以生效
+
+# 验证
+docker --version
+docker compose version
+```
+
+### GPU 版额外要求
+
+如需 GPU 加速，需安装 NVIDIA Container Toolkit：
+
+```bash
+# 添加 NVIDIA 仓库
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+  sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+  sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+
+# 安装
+sudo apt-get update
+sudo apt-get install -y nvidia-container-toolkit
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+
+# 验证
+sudo docker run --rm --gpus all nvidia/cuda:12.1-base nvidia-smi
+```
+
+## Docker 代理设置（Proxy）
+
+国内网络环境下，建议配置代理以加速镜像拉取和模型下载。
+
+### 方式一：Docker Daemon 代理（推荐）
+
+配置 Docker 守护进程使用代理，对所有 `docker pull` 生效：
+
+```bash
+# 创建 systemd 配置目录
+sudo mkdir -p /etc/systemd/system/docker.service.d
+
+# 写入代理配置（替换为你的代理地址）
+sudo tee /etc/systemd/system/docker.service.d/proxy.conf << 'EOF'
+[Service]
+Environment="HTTP_PROXY=http://127.0.0.1:7890"
+Environment="HTTPS_PROXY=http://127.0.0.1:7890"
+Environment="NO_PROXY=localhost,127.0.0.1,*.cn,mirrors.tuna.tsinghua.edu.cn"
+EOF
+
+# 重载并重启
+sudo systemctl daemon-reload
+sudo systemctl restart docker
+
+# 验证
+sudo systemctl show --property=Environment docker
+```
+
+### 方式二：Docker Build 代理
+
+构建镜像时指定代理参数：
+
+```bash
+# 构建时传入代理
+docker build \
+  --build-arg HTTP_PROXY=http://127.0.0.1:7890 \
+  --build-arg HTTPS_PROXY=http://127.0.0.1:7890 \
+  -f Dockerfile -t video2text:cu121 .
+```
+
+或修改 Dockerfile 添加 ARG（可选）：
+
+```dockerfile
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ENV http_proxy=$HTTP_PROXY \
+    https_proxy=$HTTPS_PROXY
+```
+
+### 方式三：Docker Compose 代理
+
+在 `docker-compose.yml` 中为容器配置代理环境变量：
+
+```yaml
+services:
+  video2text-gpu:
+    # ...
+    environment:
+      - HTTP_PROXY=http://host.docker.internal:7890
+      - HTTPS_PROXY=http://host.docker.internal:7890
+      - NO_PROXY=localhost,127.0.0.1
+```
+
+> **注意**：`host.docker.internal` 在 Linux 上需要添加 `--add-host` 参数，或使用宿主机 IP。
+
+### 方式四：运行时代理
+
+`docker run` 时通过 `-e` 参数指定：
+
+```bash
+docker run -d \
+  --name video2text-gpu \
+  --gpus all \
+  -e HTTP_PROXY=http://172.17.0.1:7890 \
+  -e HTTPS_PROXY=http://172.17.0.1:7890 \
+  -e NO_PROXY=localhost,127.0.0.1,*.cn \
+  ... \
+  video2text:cu121
+```
+
+> `172.17.0.1` 是 Docker 默认网桥的网关 IP，可通过 `docker network inspect bridge` 查看。
+
+### 常用代理配置汇总
+
+| 场景 | 配置方式 |
+|------|----------|
+| 拉取镜像 | Docker Daemon 代理 |
+| 构建镜像 | `--build-arg` 或 Dockerfile ARG |
+| 容器内下载模型 | 容器环境变量 `HTTP_PROXY` |
+| 全局生效 | Docker Daemon 代理 + 容器环境变量 |
+
 ## Docker 详细说明
 
 ### docker compose 启动
@@ -126,6 +255,21 @@ docker run -d \
   -v $(pwd)/workspace:/app/workspace \
   -v $(pwd)/.env:/app/.env \
   video2text:cu121
+```
+
+### Docker 清理
+
+如不再使用 Docker 部署，可删除容器和镜像：
+
+```bash
+# 停止并删除容器
+docker rm -f video2text-gpu video2text-cpu
+
+# 删除镜像
+docker rmi video2text:cu121 video2text:cpu
+
+# 清理未使用的资源（可选）
+docker system prune -f
 ```
 
 ## 硬件加速
@@ -277,6 +421,11 @@ video2text/
 | 模型下载慢 | 使用国内镜像或配置代理 |
 
 ## 更新日志
+
+### v0.2.3
+- 📖 文档完善：添加 Docker 安装教程和代理配置指南
+- 📖 添加 NVIDIA Container Toolkit 安装步骤
+- 📖 添加 Docker 清理命令说明
 
 ### v0.2.2
 - ✨ 智能文件去重：上传相同内容的视频/音频自动复用缓存
