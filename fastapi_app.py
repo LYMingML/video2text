@@ -797,6 +797,22 @@ body{
 }
 .nav button:hover{transform:translateY(-1px);border-color:#b8cec0}
 .nav button.active{background:var(--accent-soft);border-color:#9fd8c3;color:#1c5d47}
+.cookie-upload-wrapper{margin-left:auto;display:flex;align-items:center}
+.cookie-upload-label{
+    min-height:36px;
+    padding:6px 16px;
+    border:1px dashed var(--line);
+    border-radius:12px;
+    background:#fff9e6;
+    color:#8b6914;
+    font-weight:600;
+    cursor:pointer;
+    transition:all .2s ease;
+    white-space:nowrap;
+    font-size:14px;
+}
+.cookie-upload-label:hover{background:#fff3cc;border-color:#d4a800}
+.cookie-upload-wrapper input[type="file"]{display:none}
 .page{display:none;opacity:0;transform:translateY(6px)}
 .page.active{display:block;animation:fadeIn .28s ease forwards}
 @keyframes fadeIn{to{opacity:1;transform:translateY(0)}}
@@ -1076,6 +1092,10 @@ button:hover{transform:translateY(-1px);background:#ecfaf4}
                 <button id="btn-home" class="active" onclick="showPage('home')">主页</button>
                 <button id="btn-file" onclick="showPage('file')">文件管理</button>
                 <button id="btn-model" onclick="showPage('model')">配置模型</button>
+                <div class="cookie-upload-wrapper">
+                    <label for="cookieFile" class="cookie-upload-label" title="上传 Cookie 文件（用于需要登录的平台下载）">🍪 Cookie</label>
+                    <input type="file" id="cookieFile" accept=".txt" onchange="uploadCookieFile(event)" />
+                </div>
             </div>
         </aside>
 
@@ -1092,26 +1112,6 @@ button:hover{transform:translateY(-1px);background:#ecfaf4}
                             <button class="btn-danger" onclick="stopJob()">停止</button>
                             <button onclick="startTranslate()">翻译</button>
                             <button onclick="downloadOutputZip()">下载输出文件</button>
-                            <span class="subtitle-lang-label">默认字幕优先级（仅下载URL）</span>
-                            <select
-                                id="autoSubtitleLangs"
-                                class="subtitle-lang-input"
-                                title="用于在线视频下载时的自动字幕语言优先级"
-                                onchange="onAutoSubtitleLangChanged()"
-                            >
-                                <option value="zh">简体中文</option>
-                                <option value="none">无</option>
-                                <option value="en">英语</option>
-                                <option value="ja">日语</option>
-                                <option value="ko">韩语</option>
-                                <option value="es">西班牙语</option>
-                                <option value="fr">法语</option>
-                                <option value="de">德语</option>
-                                <option value="ru">俄语</option>
-                                <option value="pt">葡萄牙语</option>
-                                <option value="ar">阿拉伯语</option>
-                                <option value="hi">印地语</option>
-                            </select>
                             <span class="action-spacer"></span>
                         </div>
                     </div>
@@ -1523,6 +1523,26 @@ async function onAutoSubtitleLangChanged(){
     }catch(e){
         console.error(e);
     }
+}
+
+async function uploadCookieFile(event){
+    const file = event.target.files[0];
+    if(!file) return;
+    const formData = new FormData();
+    formData.append('cookie_file', file);
+    try{
+        const resp = await fetch('/api/upload_cookie', {method:'POST', body: formData});
+        if(!resp.ok){
+            const err = await resp.json();
+            throw new Error(err.detail || '上传失败');
+        }
+        const data = await resp.json();
+        alert('✅ Cookie 文件已上传：' + data.filename);
+        document.getElementById('statusText').value = '✅ Cookie 已上传：' + data.filename;
+    }catch(e){
+        alert('❌ 上传 Cookie 失败：' + e.message);
+    }
+    event.target.value = '';
 }
 
 function renderIconGrid(containerId, items, selectedValue, onPick, keyword){
@@ -3352,6 +3372,10 @@ def _download_with_ytdlp(url: str, payload: dict) -> dict:
         return any(k in t for k in login_kw)
 
     def _cookie_args(browser: str | None) -> list[str]:
+        # 优先使用上传的 cookies.txt 文件
+        cookie_file = project_root / "cookies.txt"
+        if cookie_file.exists():
+            return ["--cookies", str(cookie_file)]
         return ["--cookies-from-browser", browser] if browser else []
 
     def _get_title(cookie_extra: list[str]) -> str | None:
@@ -3455,6 +3479,29 @@ def api_download_file(path: str):
         raise HTTPException(status_code=404, detail="文件不存在")
 
     return FileResponse(str(target), filename=target.name)
+
+
+@app.post("/api/upload_cookie")
+def api_upload_cookie(cookie_file: UploadFile = File(...)):
+    """上传 Cookie 文件用于需要登录的平台下载"""
+    if not cookie_file.filename:
+        raise HTTPException(status_code=400, detail="未选择文件")
+
+    # 只接受 .txt 文件
+    if not cookie_file.filename.lower().endswith('.txt'):
+        raise HTTPException(status_code=400, detail="只支持 .txt 格式的 Cookie 文件")
+
+    # 保存到项目根目录
+    project_root = Path(__file__).resolve().parent
+    cookie_path = project_root / "cookies.txt"
+
+    try:
+        with cookie_path.open("wb") as f:
+            shutil.copyfileobj(cookie_file.file, f)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"保存 Cookie 文件失败：{e}")
+
+    return {"filename": cookie_file.filename, "path": str(cookie_path)}
 
 
 @app.post("/api/jobs/import-subtitle")

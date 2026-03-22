@@ -176,11 +176,43 @@
 
 ### Q: 如何下载需要登录的视频？
 
-在 `.env` 文件中配置：
-```bash
-# 使用浏览器 Cookie
-YT_DLP_COOKIES_FROM_BROWSER=chrome
-```
+**方法一：上传 Cookie 文件（推荐）**
+
+1. 在浏览器中登录目标网站
+2. 使用浏览器扩展导出 cookies.txt 文件
+3. 点击界面左侧「🍪 Cookie」按钮上传文件
+
+**Chrome/Edge 导出 Cookie 歨骤**：
+1. 安装扩展 [Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc)
+2. 打开目标网站并登录
+3. 点击扩展图标 → 点击「Export」导出 cookies.txt
+4. 在 video2text 中上传该文件
+
+**方法二：自动读取浏览器 Cookie**
+
+程序会自动尝试从以下浏览器读取 Cookie：
+- Chrome
+- Chromium
+- Firefox
+- Edge
+
+只需在浏览器中登录目标网站，程序会自动读取。
+
+---
+
+### Q: 哪些平台需要 Cookie？
+
+| 平台 | 是否需要 Cookie | 说明 |
+|------|----------------|------|
+| YouTube | 部分需要 | 私密视频、会员内容需要 |
+| B站 | 通常不需要 | 部分限制视频可能需要 |
+| 抖音 | 鸡部分需要 | 需要登录的视频 |
+| Instagram | 需要 | 必须登录 |
+| Twitter/X | 部分需要 | 敏感内容需要 |
+| Facebook | 需要 | 必须登录 |
+| TikTok | 通常不需要 | 部分地区可能需要 |
+
+---
 
 ### Q: 下载的视频在哪里？
 
