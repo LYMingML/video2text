@@ -403,37 +403,7 @@ video2text/
 
 ## 许可证
 
-本项目采用 MIT 许可证。详见 [LICENSE](LICENSE) 文件。
-
-### 第三方库许可证
-
-本项目依赖以下开源库：
-
-| 库名 | 许可证 | 用途 |
-|------|--------|------|
-| faster-whisper | MIT | Whisper 语音识别 |
-| FunASR | MIT | 阿里语音识别 |
-| yt-dlp | Unlicense | 视频下载 |
-| gradio | Apache-2.0 | Web 界面 |
-| fastapi | MIT | API 服务 |
-| ffmpeg-python | Apache-2.0 | 音视频处理 |
-| stable-ts | MIT | Whisper 时间戳优化 |
-
-### 集成工具许可证
-
-可选集成的下载工具：
-
-| 工具 | 许可证 | 用途 |
-|------|--------|------|
-| XHS-Downloader | GPL-3.0 | 小红书下载 |
-| gallery-dl | GPL-2.0 | 图片/视频采集 |
-| you-get | MIT | 视频下载 |
-| lux | MIT | 视频下载 |
-| spotdl | MIT | Spotify 下载 |
-
-> ⚠️ GPL 许可的工具：如果分发包含这些工具的版本，需遵守 GPL 条款。
-
----
+MIT License
 
 ## 致谢
 
