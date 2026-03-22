@@ -68,6 +68,24 @@ def _get_temp_video_keep_count():
 
 TEMP_VIDEO_KEEP_COUNT = _get_temp_video_keep_count()
 
+# 正在转录的视频路径（用于清理临时文件时跳过）
+_TRANSCRIBING_VIDEO: str | None = None
+_TRANSCRIBING_VIDEO_LOCK = threading.Lock()
+
+
+def set_transcribing_video(path: str | None):
+    """设置当前正在转录的视频路径"""
+    global _TRANSCRIBING_VIDEO
+    with _TRANSCRIBING_VIDEO_LOCK:
+        _TRANSCRIBING_VIDEO = path
+
+
+def get_transcribing_video() -> str | None:
+    """获取当前正在转录的视频路径"""
+    with _TRANSCRIBING_VIDEO_LOCK:
+        return _TRANSCRIBING_VIDEO
+
+
 # 文件指纹数据库
 _FINGERPRINT_DB_PATH = WORKSPACE_DIR / "fingerprints.db"
 _fingerprint_db_lock = threading.Lock()
@@ -518,13 +536,39 @@ def _unique_file_path(dir_path: Path, filename: str) -> Path:
 
 
 def _prune_temp_video_dir(max_items: int = TEMP_VIDEO_KEEP_COUNT):
+    """清理临时视频目录
+
+    规则：
+    1. 不清理正在转录的视频
+    2. 文件数量超过 max_items 时，清理一小时前的文件
+    """
+    TEMP_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 获取正在转录的视频路径
+    transcribing_video = get_transcribing_video()
+
     files = [p for p in TEMP_VIDEO_DIR.iterdir() if p.is_file()]
+
+    # 过滤掉正在转录的视频
+    if transcribing_video:
+        transcribing_path = Path(transcribing_video).resolve()
+        files = [f for f in files if f.resolve() != transcribing_path]
+
+    # 按修改时间排序（最新的在前）
     files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    for old in files[max_items:]:
-        try:
-            old.unlink()
-        except OSError:
-            pass
+
+    # 如果文件数量超过限制，清理一小时前的文件
+    if len(files) > max_items:
+        import time
+        one_hour_ago = time.time() - 3600  # 1小时 = 3600秒
+
+        # 保留最新的 max_items 个文件，清理一小时前的旧文件
+        for old in files[max_items:]:
+            try:
+                if old.stat().st_mtime < one_hour_ago:
+                    old.unlink()
+            except OSError:
+                pass
 
 
 

@@ -1135,7 +1135,7 @@ button:hover{transform:translateY(-1px);background:#ecfaf4}
                             <input type="url" id="urlInput" placeholder="https://www.youtube.com/watch?v=..." />
                         </div>
                         <div class="drag-item toolbar tight" draggable="true" style="flex:none;align-self:flex-end">
-                            <button id="urlDownloadBtn" onclick="downloadVideoUrl()">下载视频</button>
+                            <button id="urlDownloadBtn" onclick="downloadVideoUrl()">下载目标URL</button>
                         </div>
                     </div>
                     <div class="drag-row">
@@ -2747,12 +2747,30 @@ async function downloadVideoUrl(){
       throw new Error(d.detail||'下载失败');
     }
     const data = await r.json();
-    document.getElementById('statusText').value = '✅ 下载完成: '+data.filename;
     document.getElementById('urlInput').value = '';
-    // 传入 filepath 作为 preferredValue，refreshHistory 内部会优先精确匹配，
-    // 若文件因去重被隐藏（已有同 stem 的 .wav），则自动回退到同 stem 的音频文件
+
+    // 刷新历史列表并选中下载的视频
     await refreshHistory(data.filepath || '');
     if(typeof syncSelectionStates==='function') syncSelectionStates();
+
+    // 弹窗询问用户是否下载到本地（默认不下载）
+    const saveToLocal = confirm(`视频已下载到临时目录：\n${data.filename}\n\n是否保存到本地下载目录？\n\n点击「确定」保存到本地\n点击「取消」仅保留临时文件`);
+
+    if(saveToLocal){
+      // 用户选择保存到本地，触发浏览器下载
+      document.getElementById('statusText').value = '⏳ 正在保存到本地…';
+      const downloadUrl = '/api/download_file?path=' + encodeURIComponent(data.filepath);
+      const a = document.createElement('a');
+      a.href = downloadUrl;
+      a.download = data.filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      document.getElementById('statusText').value = '✅ 已保存: '+data.filename+' (点击「开始转录」继续)';
+    } else {
+      document.getElementById('statusText').value = '✅ 已下载到临时目录: '+data.filename+' (点击「开始转录」继续)';
+    }
+
         if(data.auto_subtitle && data.subtitle_path){
             document.getElementById('statusText').value = '⏳ 检测到平台自动字幕，正在导入…';
             const imported = await api('/api/jobs/import-subtitle', {
@@ -2767,9 +2785,7 @@ async function downloadVideoUrl(){
             startPoll();
             return;
         }
-        // 未命中自动字幕时，按原流程启动转录
-        document.getElementById('statusText').value = '⏳ 下载完成，正在启动转录…';
-        await startTranscribe();
+        // 不自动开始转录，让用户手动点击「开始转录」
   }catch(e){
     alert('❌ '+e.message);
     document.getElementById('statusText').value = '❌ 下载失败';
@@ -3422,6 +3438,25 @@ def _download_with_ytdlp(url: str, payload: dict) -> dict:
     raise HTTPException(status_code=500, detail="下载失败：无法获取视频信息，请检查 URL 或网络")
 
 
+@app.get("/api/download_file")
+def api_download_file(path: str):
+    """下载临时目录中的文件到本地"""
+    if not path:
+        raise HTTPException(status_code=400, detail="path 参数不能为空")
+
+    project_root = Path(__file__).resolve().parent
+    target = (project_root / path).resolve()
+
+    # 安全检查：确保文件在项目目录内
+    if project_root.resolve() not in target.parents and target.resolve() != project_root:
+        raise HTTPException(status_code=403, detail="禁止访问项目目录外的文件")
+
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="文件不存在")
+
+    return FileResponse(str(target), filename=target.name)
+
+
 @app.post("/api/jobs/import-subtitle")
 def api_job_import_subtitle(payload: dict[str, str]):
     global _RUNTIME_THREAD
@@ -3530,21 +3565,25 @@ def api_transcribe_start(
     _set_job_state(job)
 
     def runner():
-        _run_transcribe_worker(
-            job,
-            video_path,
-            backend,
-            language,
-            whisper_model,
-            funasr_model,
-            device,
-        )
-        if temp_path and temp_path.exists():
-            try:
-                temp_path.unlink()
-            except Exception:
-                pass
+        try:
+            _run_transcribe_worker(
+                job,
+                video_path,
+                backend,
+                language,
+                whisper_model,
+                funasr_model,
+                device,
+            )
+        finally:
+            core.set_transcribing_video(None)
+            if temp_path and temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except Exception:
+                    pass
 
+    core.set_transcribing_video(video_path)
     _RUNTIME_THREAD = threading.Thread(target=runner, daemon=True)
     _RUNTIME_THREAD.start()
     # 返回相对路径供前端显示
