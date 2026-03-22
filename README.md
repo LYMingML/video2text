@@ -401,13 +401,16 @@ video2text/
 - ✨ Docker 优化：多阶段构建，预置核心模型
 - ✨ 新增 `docker-install.sh` 一键安装脚本
 
+## 支持平台
+
+### 国内
+B站、小红书、抖音、快手、微博、知乎、优酷、爱奇艺、腾讯视频、公众号文章
+
+### 国外
+YouTube、TikTok、Instagram、Twitter/X、Facebook、Vimeo、Spotify
+
+> 📖 详细下载教程见 [docs/video-download-tutorial.md](docs/video-download-tutorial.md)
+
 ## 许可证
 
 MIT License
-
-## 致谢
-
-- [OpenAI Whisper](https://github.com/openai/whisper) - 原始 Whisper 模型
-- [ModelScope FunASR](https://modelscope.cn/) - 阿里语音识别模型
-- [Hugging Face](https://huggingface.co/) - 模型托管
-- [FFmpeg](https://ffmpeg.org/) - 音视频处理
