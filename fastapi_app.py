@@ -23,6 +23,12 @@ import main as core
 from utils.online_models import delete_profile, load_app_settings, load_profiles, save_app_settings, save_profiles, upsert_profile
 from utils.subtitle import collect_plain_text, normalize_segments_timeline, save_plain, save_srt, segments_to_plain
 from utils.translate import is_ollama_base_url, list_available_models, translate_segments
+from utils.xhs_downloader import (
+    is_xiaohongshu_url,
+    download_xhs_video,
+    get_xhs_client,
+    XHSDownloadResult,
+)
 
 app = FastAPI(title="video2text-fastapi")
 
@@ -3255,11 +3261,57 @@ def _find_ytdlp() -> str:
 
 @app.post("/api/download_url")
 def api_download_url(payload: dict):
-    """使用 yt-dlp 下载视频或音频，直接下载到以 title 前 20 字符命名的目录。"""
+    """使用 XHS-Downloader（小红书）或 yt-dlp 下载视频或音频。"""
     url = (payload.get("url") or "").strip()
     if not url:
         raise HTTPException(status_code=400, detail="URL 不能为空")
 
+    # 检测小红书链接，优先使用 XHS-Downloader
+    if is_xiaohongshu_url(url):
+        return _download_xiaohongshu(url)
+
+    return _download_with_ytdlp(url, payload)
+
+
+def _download_xiaohongshu(url: str) -> dict:
+    """使用 XHS-Downloader 下载小红书视频"""
+    project_root = Path(__file__).resolve().parent
+    core.TEMP_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 检查 XHS-Downloader API 服务是否可用
+    client = get_xhs_client()
+    if not client.check_server():
+        raise HTTPException(
+            status_code=503,
+            detail="XHS-Downloader 服务未启动。请先启动 XHS-Downloader API 服务:\n"
+                   "cd /path/to/XHS-Downloader && python main.py api"
+        )
+
+    # 下载视频
+    result = download_xhs_video(url, output_dir=core.TEMP_VIDEO_DIR, timeout=120)
+
+    if not result.success:
+        raise HTTPException(
+            status_code=500,
+            detail=f"小红书视频下载失败: {result.error}"
+        )
+
+    # 清理临时目录
+    core._prune_temp_video_dir()
+
+    media_path = Path(result.file_path)
+    return {
+        "filepath": media_path.relative_to(project_root).as_posix(),
+        "filename": result.file_name,
+        "auto_subtitle": False,
+        "xhs_note_id": result.note_id,
+        "xhs_title": result.note_title,
+        "xhs_author": result.author_name,
+    }
+
+
+def _download_with_ytdlp(url: str, payload: dict) -> dict:
+    """使用 yt-dlp 下载视频"""
     app_settings = load_app_settings()
     subtitle_priority = _normalize_subtitle_priority(
         str(payload.get("auto_subtitle_lang", "")).strip()
