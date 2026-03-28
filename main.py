@@ -627,6 +627,42 @@ def _cleanup_job_source_media(job_dir: Path):
             pass
 
 
+def _schedule_video_deletion(video_path: str, delay_seconds: int = 60):
+    """
+    在延迟指定秒数后删除视频文件（仅限 temp_video 目录中的文件）。
+    使用后台线程实现，不阻塞主流程。
+    """
+    video = Path(video_path) if video_path else None
+    if not video or not video.exists():
+        return
+
+    # 只删除 temp_video 目录中的文件
+    try:
+        if not _is_temp_video_dir(video.parent):
+            logger.debug(f"视频不在 temp_video 目录，不自动删除: {video_path}")
+            return
+    except Exception:
+        return
+
+    def _delete_after_delay():
+        try:
+            time.sleep(delay_seconds)
+            # 再次检查文件是否还存在且仍在 temp_video 目录
+            if video.exists() and _is_temp_video_dir(video.parent):
+                try:
+                    video.unlink()
+                    logger.info(f"[CLEANUP] 已删除临时视频文件: {video.name}")
+                except OSError as e:
+                    logger.warning(f"[CLEANUP] 删除临时视频失败: {e}")
+        except Exception as e:
+            logger.warning(f"[CLEANUP] 延迟删除线程异常: {e}")
+
+    # 启动后台守护线程
+    t = threading.Thread(target=_delete_after_delay, daemon=True)
+    t.start()
+    logger.info(f"[CLEANUP] 已安排 {delay_seconds} 秒后删除临时视频: {video.name}")
+
+
 def _resolve_job_dir_for_input(input_path: str) -> Path:
     src = Path(input_path)
     if src.exists() and src.suffix.lower() == ".wav":
@@ -1120,7 +1156,8 @@ def translate_current_job(
         )
 
     zh_segments = normalize_segments_timeline(translated)
-    zh_srt_path = save_srt(zh_segments, str(job_dir / f"{file_prefix}.zh.srt"), normalize=False)
+    # 翻译后的中文字幕启用自动换行（每25个字符）
+    zh_srt_path = save_srt(zh_segments, str(job_dir / f"{file_prefix}.zh.srt"), normalize=False, wrap=True, is_translated=True)
     zh_txt_path = save_plain(zh_segments, str(job_dir / f"{file_prefix}.zh.txt"), normalize=False)
     push_log(f"[OUT] 中文 SRT: {Path(zh_srt_path).name}")
     push_log(f"[OUT] 中文 TXT: {Path(zh_txt_path).name}")
@@ -1201,6 +1238,8 @@ def _do_transcribe_stream(
                 log_cb("[STEP] 正在使用 ffmpeg 提取 WAV 文件（16kHz/单声道）...")
             yield "⏳ 正在使用 ffmpeg 提取 WAV 文件...", []
             extract_audio(video_path, audio_path)
+            # 音频提取完成后，安排 60 秒后删除临时视频文件
+            _schedule_video_deletion(video_path, delay_seconds=60)
         staged_source_path = _stage_source_media_to_temp_video(video_path)
         if log_cb and Path(staged_source_path).suffix.lower() in _SOURCE_MEDIA_EXTS:
             log_cb(f"[MEDIA] 原始媒体已归档到 workspace/temp_video/{Path(staged_source_path).name}")

@@ -3,18 +3,81 @@ FunASR Paraformer 后端
 使用阿里达摩院 Paraformer + fsmn-vad + ct-punc 管线
 中文识别准确率优于 Whisper，推理速度快 5-15 倍
 
-CUDA 兼容性：建议 torch==2.3.1+cu121（兼容 Tesla P4 sm_61）
+GPU 加速选项：
+  - CUDA:  NVIDIA GPU (Tesla P4 sm_61 需要 PyTorch 2.5.x 或更早)
+  - XPU:   Intel GPU (需要 Intel oneAPI + intel-extension-for-pytorch)
+  - CPU:   通用回退
+
+安装 Intel GPU 支持：
+  # 1. 安装 oneAPI Base Toolkit
+  wget https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB
+  sudo apt-key add GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB
+  echo "deb https://apt.repos.intel.com/oneapi all main" | sudo tee /etc/apt/sources.list.d/oneAPI.list
+  sudo apt update && sudo apt install -y intel-oneapi-base-toolkit
+
+  # 2. 安装 Intel Extension for PyTorch
+  source /opt/intel/oneapi/setvars.sh
+  pip install intel-extension-for-pytorch
+
+  # 3. 在 .env 中设置 PREFER_INTEL_GPU=1
 """
 
 from __future__ import annotations
 import logging
+import os
 import re
 from typing import Callable
 
 logger = logging.getLogger(__name__)
 
+# 环境变量配置
+PREFER_INTEL_GPU = os.environ.get("PREFER_INTEL_GPU", "0") == "1"
+
 # 延迟导入，避免未安装 funasr 时影响其他后端
 _model_cache: dict[tuple[str, str], object] = {}
+
+
+def _detect_best_device() -> str:
+    """
+    检测最佳计算设备。
+
+    优先级（可配置）：
+    1. Intel XPU (如果 PREFER_INTEL_GPU=1 且 intel-extension-for-pytorch 可用)
+    2. NVIDIA CUDA (如果可用且兼容)
+    3. CPU (通用回退)
+
+    Returns:
+        设备字符串: "xpu", "cuda:0", 或 "cpu"
+    """
+    # 尝试 Intel XPU
+    if PREFER_INTEL_GPU:
+        try:
+            import torch
+            if hasattr(torch, 'xpu') and torch.xpu.is_available():
+                logger.info("使用 Intel XPU (Intel GPU)")
+                return "xpu"
+        except Exception as e:
+            logger.debug(f"Intel XPU 检测失败: {e}")
+
+    # 尝试 NVIDIA CUDA
+    try:
+        import torch
+        if torch.cuda.is_available():
+            try:
+                major, minor = torch.cuda.get_device_capability(0)
+                # 实际测试 GPU 是否可用（PyTorch 2.5.x 支持 sm_61）
+                test_tensor = torch.zeros(1, device="cuda:0")
+                del test_tensor
+                torch.cuda.empty_cache()
+                logger.info(f"使用 NVIDIA CUDA (sm_{major}{minor})")
+                return "cuda:0"
+            except Exception as e:
+                logger.warning(f"CUDA 设备测试失败: {e}，回退到 CPU")
+    except Exception as e:
+        logger.debug(f"CUDA 检测失败: {e}")
+
+    logger.info("使用 CPU")
+    return "cpu"
 
 
 def _is_sensevoice_model(model_name: str) -> bool:
@@ -63,12 +126,24 @@ def _normalize_model_name(model_name: str) -> str:
     return alias_map.get(raw, raw)
 
 
-def _get_model(model_name: str = "paraformer-zh", device: str = "cuda:0", speaker_mode: bool = False):
+def _get_model(model_name: str = "paraformer-zh", device: str = "auto", speaker_mode: bool = False):
     """
     懒加载并缓存 FunASR AutoModel 实例。
     首次调用会从 ModelScope 下载模型（约 500MB）。
+
+    Args:
+        model_name: 模型名称
+        device: 设备类型 ("auto", "xpu", "cuda:0", "cpu")
+                "auto" 自动检测最佳设备
+        speaker_mode: 是否启用说话人分离
     """
     model_name = _normalize_model_name(model_name)
+
+    # 自动检测设备
+    if device == "auto":
+        device = _detect_best_device()
+        logger.info(f"自动选择设备: {device}")
+
     cache_key = (model_name, device, speaker_mode)
     if cache_key in _model_cache:
         return _model_cache[cache_key]
@@ -81,7 +156,16 @@ def _get_model(model_name: str = "paraformer-zh", device: str = "cuda:0", speake
             "  pip install funasr modelscope"
         )
 
-    logger.info(f"加载 FunASR 模型: {model_name}（首次使用会下载模型）...")
+    # Intel XPU 需要额外初始化
+    if device == "xpu":
+        try:
+            import intel_extension_for_pytorch as ipex
+            logger.info("Intel Extension for PyTorch 已加载")
+        except ImportError:
+            logger.warning("intel-extension-for-pytorch 未安装，回退到 CPU")
+            device = "cpu"
+
+    logger.info(f"加载 FunASR 模型: {model_name} on {device}（首次使用会下载模型）...")
     is_sv = _is_sensevoice_model(model_name)
     model_kwargs = dict(
         model=model_name,
@@ -104,13 +188,16 @@ def _get_model(model_name: str = "paraformer-zh", device: str = "cuda:0", speake
 
 
 def _split_by_punctuation(
-    text: str, timestamps: list[list[int]]
+    text: str, timestamps: list[list[int]], max_chars: int = 15
 ) -> list[tuple[float, float, str]]:
     """
-    按中文句末标点将文本拆分为多个字幕条目。
+    将文本拆分为多个字幕条目，优先按句末标点，其次按逗号等停顿标点。
+    每句尽量不超过 max_chars 字符。
+
     timestamps[i] = [start_ms, end_ms] 对应 text[i] 的字符级时间戳。
     """
-    ENDINGS = set("。！？…!?")
+    SENTENCE_END = set("。！？…!?")
+    PAUSE_MARKS = set("，,；;：:、")  # 停顿标点
 
     if not timestamps or len(timestamps) < len(text):
         # 时间戳不完整，整段作为一个条目
@@ -121,17 +208,191 @@ def _split_by_punctuation(
     segments: list[tuple[float, float, str]] = []
     seg_start = 0
 
-    for i, char in enumerate(text):
-        is_last = (i == len(text) - 1)
-        if char in ENDINGS or is_last:
-            sentence = text[seg_start: i + 1].strip()
-            if sentence:
-                start_s = timestamps[seg_start][0] / 1000
-                end_s = timestamps[i][1] / 1000
-                segments.append((start_s, end_s, sentence))
-            seg_start = i + 1
+    def add_segment(seg_end: int):
+        """添加一个片段到 segments"""
+        nonlocal seg_start
+        if seg_end <= seg_start:
+            return
+        sentence = text[seg_start: seg_end + 1].strip()
+        if sentence:
+            start_s = timestamps[seg_start][0] / 1000
+            end_s = timestamps[min(seg_end, len(timestamps) - 1)][1] / 1000
+            segments.append((start_s, end_s, sentence))
+        seg_start = seg_end + 1
+
+    i = seg_start
+    last_pause = -1  # 上一个停顿标点位置
+
+    while i < len(text):
+        char = text[i]
+
+        # 句末标点：立即断句
+        if char in SENTENCE_END:
+            add_segment(i)
+            last_pause = -1
+        # 停顿标点：记录位置，可能用于断句
+        elif char in PAUSE_MARKS:
+            last_pause = i
+            # 如果已经超过 max_chars，在停顿处断句
+            if i - seg_start + 1 >= max_chars:
+                add_segment(i)
+                last_pause = -1
+        # 普通字符：检查长度
+        else:
+            current_len = i - seg_start + 1
+            if current_len >= max_chars:
+                # 优先在最近的停顿标点处断句
+                if last_pause >= seg_start:
+                    add_segment(last_pause)
+                    i = last_pause  # 下次循环会 +1
+                else:
+                    # 没有停顿标点，强制在当前位置断句（避免破坏词语）
+                    add_segment(i)
+                last_pause = -1
+
+        i += 1
+
+    # 处理剩余文本
+    if seg_start < len(text):
+        sentence = text[seg_start:].strip()
+        if sentence:
+            start_s = timestamps[seg_start][0] / 1000
+            end_s = timestamps[-1][1] / 1000
+            segments.append((start_s, end_s, sentence))
 
     return segments
+
+
+def _split_text_without_timestamps(
+    text: str, start_time: float, max_chars: int = 12, char_duration: float = 0.15
+) -> list[tuple[float, float, str]]:
+    """
+    当没有时间戳时，智能拆分文本并估算时间戳。
+
+    Args:
+        text: 要拆分的文本
+        start_time: 起始时间（秒）
+        max_chars: 每段最大字符数（默认 12，适合快速阅读）
+        char_duration: 每字符平均时长（秒，默认 0.15s 约 6-7 字/秒）
+
+    Returns:
+        [(start_s, end_s, text), ...]
+    """
+    SENTENCE_END = set("。！？…!?")
+    PAUSE_MARKS = set("，,；;：:、")
+
+    segments: list[tuple[float, float, str]] = []
+    seg_start = 0
+    cursor = start_time
+
+    def add_segment(seg_end: int, pause_after: float = 0.0):
+        """添加一个片段并估算时间戳"""
+        nonlocal seg_start, cursor
+        if seg_end <= seg_start:
+            return
+        sentence = text[seg_start: seg_end + 1].strip()
+        if sentence:
+            # 根据字符数估算时长，加上停顿时间
+            duration = len(sentence) * char_duration + pause_after
+            # 限制时长范围
+            duration = max(0.8, min(duration, 5.0))
+            end_time = cursor + duration
+            segments.append((round(cursor, 3), round(end_time, 3), sentence))
+            cursor = end_time
+        seg_start = seg_end + 1
+
+    i = seg_start
+    last_pause = -1
+
+    while i < len(text):
+        char = text[i]
+
+        if char in SENTENCE_END:
+            # 句末标点：断句，加稍长停顿
+            add_segment(i, pause_after=0.3)
+            last_pause = -1
+        elif char in PAUSE_MARKS:
+            last_pause = i
+            # 超过 max_chars 时断句
+            if i - seg_start + 1 >= max_chars:
+                add_segment(i, pause_after=0.15)
+                last_pause = -1
+        else:
+            current_len = i - seg_start + 1
+            if current_len >= max_chars:
+                if last_pause >= seg_start:
+                    add_segment(last_pause, pause_after=0.15)
+                    i = last_pause
+                else:
+                    add_segment(i, pause_after=0.1)
+                last_pause = -1
+
+        i += 1
+
+    # 处理剩余文本
+    if seg_start < len(text):
+        sentence = text[seg_start:].strip()
+        if sentence:
+            duration = max(0.8, len(sentence) * char_duration)
+            segments.append((round(cursor, 3), round(cursor + duration, 3), sentence))
+
+    return segments
+
+
+def _fix_time_gaps(
+    segments: list[tuple[float, float, str]],
+    max_gap_seconds: float = 300.0,  # 5 分钟
+    avg_char_duration: float = 0.15,
+) -> list[tuple[float, float, str]]:
+    """
+    修复时间跳跃过大的问题。
+
+    当检测到相邻字幕之间有超过 max_gap_seconds 的跳跃时：
+    1. 记录警告日志
+    2. 尝试重新估算时间戳，使其连续
+
+    Args:
+        segments: 原始字幕片段 [(start, end, text), ...]
+        max_gap_seconds: 允许的最大时间跳跃（默认 5 分钟）
+        avg_char_duration: 平均每字符时长（用于估算）
+
+    Returns:
+        修复后的字幕片段
+    """
+    if len(segments) < 2:
+        return segments
+
+    fixed: list[tuple[float, float, str]] = []
+    cursor = segments[0][0]  # 从第一条字幕的开始时间开始
+
+    for i, (start, end, text) in enumerate(segments):
+        # 检测时间跳跃
+        gap = start - cursor
+
+        if gap > max_gap_seconds:
+            # 超过允许的最大跳跃，重新估算时间
+            logger.warning(
+                f"检测到时间跳跃: {gap:.0f}s ({gap/60:.1f}min)，"
+                f"从 {cursor:.1f}s 跳到 {start:.1f}s，重新估算时间戳"
+            )
+            # 使用估算时长
+            est_duration = max(1.0, len(text) * avg_char_duration)
+            est_duration = min(est_duration, 10.0)  # 限制最大 10 秒
+            fixed_start = cursor
+            fixed_end = cursor + est_duration
+            fixed.append((round(fixed_start, 3), round(fixed_end, 3), text))
+            cursor = fixed_end
+        else:
+            # 正常范围，保留原始时间（但确保连续）
+            if start < cursor:
+                # 时间倒退，修正为当前游标
+                start = cursor
+                duration = max(1.0, len(text) * avg_char_duration)
+                end = start + duration
+            fixed.append((round(start, 3), round(end, 3), text))
+            cursor = max(cursor, end)
+
+    return fixed
 
 
 def _label_speaker_fallback(segments: list[tuple[float, float, str]]) -> list[tuple[float, float, str]]:
@@ -185,7 +446,7 @@ def transcribe(
     audio_path: str,
     model_name: str = "paraformer-zh",
     language: str = "auto",
-    device: str = "cuda:0",
+    device: str = "auto",
     progress_cb: Callable[[float, str], None] | None = None,
 ) -> list[tuple[float, float, str]]:
     """
@@ -195,7 +456,8 @@ def transcribe(
         audio_path: WAV 文件路径
         model_name: FunASR 模型名
         language:   "auto" / "zh" / "en" / "yue" / "ja" / "ko" / "es"
-        device:     "cuda:0" 或 "cpu"
+        device:     "auto" / "xpu" / "cuda:0" / "cpu"
+                    "auto" 自动检测最佳设备（优先级：Intel XPU > CUDA > CPU）
         progress_cb: 可选进度回调 (progress_ratio, message)
 
     Returns:
@@ -281,13 +543,12 @@ def transcribe(
         timestamps: list[list[int]] = item.get("timestamp", [])
 
         if not timestamps:
-            # 没有时间戳时降级：按文本长度估算时长，避免返回空结果
-            est_duration = max(1.5, min(12.0, len(text) / 4.0))
-            start_s = fallback_cursor
-            end_s = start_s + est_duration
-            segments.append((start_s, end_s, text))
-            fallback_cursor = end_s
-            logger.warning(f"FunASR: 段落无时间戳，使用估算时间: {text[:30]}")
+            # 没有时间戳时，按标点拆分后估算时间
+            sub_segs = _split_text_without_timestamps(text, fallback_cursor)
+            if sub_segs:
+                segments.extend(sub_segs)
+                fallback_cursor = sub_segs[-1][1]
+                logger.debug(f"FunASR: 无时间戳，智能拆分为 {len(sub_segs)} 段")
             continue
 
         # 按标点拆句，生成更精细的字幕条目
@@ -300,6 +561,9 @@ def transcribe(
 
     if progress_cb:
         progress_cb(1.0, f"完成，共 {len(segments)} 条字幕")
+
+    # 修复时间跳跃（超过 5 分钟的跳跃）
+    segments = _fix_time_gaps(segments, max_gap_seconds=300.0)
 
     return segments
 

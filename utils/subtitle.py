@@ -24,6 +24,17 @@ TAG_PATTERNS = [
     re.compile(r"<[^>]+>", re.IGNORECASE),        # e.g. <speech>
 ]
 
+# Whisper 幻觉/水印清理模式
+WHISPER_HALLUCINATION_PATTERNS = [
+    re.compile(r"\[cite:\s*\d+\]", re.IGNORECASE),       # [cite: 35]
+    re.compile(r"\[citation:\s*\d+\]", re.IGNORECASE),   # [citation: 35]
+    re.compile(r"\[\d+\]", re.IGNORECASE),               # [1], [35] - 纯数字引用
+    re.compile(r"\(cite:\s*\d+\)", re.IGNORECASE),       # (cite: 35)
+    re.compile(r"subtitle\s*by\s*.*$", re.IGNORECASE),   # subtitle by xxx
+    re.compile(r"www\.\w+\.(com|net|org|cn)", re.IGNORECASE),  # 网址水印
+    re.compile(r"^\s*-\s*$"),                            # 单独的短横线
+]
+
 
 def _dedupe_punctuation(text: str) -> str:
     """清理冗余标点与异常组合，保留自然停顿。"""
@@ -39,6 +50,85 @@ def _dedupe_punctuation(text: str) -> str:
     # 去除角色前缀与正文之间多余空白
     line = re.sub(r"^(角色\d+\s*:\s*)", lambda m: m.group(1).replace(" ", ""), line)
     return line.strip()
+
+
+def _wrap_chinese_text(text: str, max_chars: int = 25) -> str:
+    """中文文本按字符数换行，每行最多 max_chars 个字符。"""
+    if not text:
+        return text
+    # 移除现有换行，重新按字符数换行
+    text = text.replace("\n", " ")
+    lines = []
+    current_line = ""
+    for char in text:
+        current_line += char
+        if len(current_line) >= max_chars:
+            lines.append(current_line)
+            current_line = ""
+    if current_line:
+        lines.append(current_line)
+    return "\n".join(lines)
+
+
+def _wrap_english_text(text: str, max_words: int = 20) -> str:
+    """英文/外文本按单词数换行，每行最多 max_words 个单词。"""
+    if not text:
+        return text
+    # 移除现有换行，重新按单词数换行
+    text = text.replace("\n", " ")
+    words = text.split()
+    lines = []
+    current_line_words = []
+    for word in words:
+        current_line_words.append(word)
+        if len(current_line_words) >= max_words:
+            lines.append(" ".join(current_line_words))
+            current_line_words = []
+    if current_line_words:
+        lines.append(" ".join(current_line_words))
+    return "\n".join(lines)
+
+
+def _is_chinese_text(text: str) -> bool:
+    """判断文本是否主要为中文（中文字符占比超过50%）。"""
+    if not text:
+        return False
+    chinese_chars = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
+    return chinese_chars / len(text) > 0.5
+
+
+def wrap_text(text: str, is_translated: bool = False) -> str:
+    """
+    根据文本类型进行换行处理。
+    - 翻译后的文本（中文）：每25个字符换行
+    - 外文原文：每20个词换行
+    """
+    if not text:
+        return text
+    if is_translated or _is_chinese_text(text):
+        return _wrap_chinese_text(text, max_chars=25)
+    else:
+        return _wrap_english_text(text, max_words=20)
+
+
+def wrap_segments_text(
+    segments: list[tuple], is_translated: bool = False
+) -> list[tuple]:
+    """
+    为所有字幕片段的文本应用换行处理。
+
+    Args:
+        segments: [(start_s, end_s, text), ...]
+        is_translated: 是否为翻译后的文本
+
+    Returns:
+        处理后的 segments
+    """
+    wrapped = []
+    for start, end, text in segments:
+        wrapped_text = wrap_text(text, is_translated=is_translated)
+        wrapped.append((start, end, wrapped_text))
+    return wrapped
 
 
 def _is_noise_text(text: str) -> bool:
@@ -60,6 +150,10 @@ def _is_noise_text(text: str) -> bool:
 def _normalize_plain_line(text: str) -> str:
     """纯文本行归一化：去噪、折叠空白。"""
     line = text
+    # 清理 Whisper 幻觉/水印
+    for pattern in WHISPER_HALLUCINATION_PATTERNS:
+        line = pattern.sub("", line)
+    # 清理标签
     for pattern in TAG_PATTERNS:
         line = pattern.sub(" ", line)
     line = re.sub(r"\s+", " ", line).strip()
@@ -85,6 +179,7 @@ def normalize_segments_timeline(
     segments: list[tuple],
     min_duration_s: float = 0.8,
     max_duration_s: float = 12.0,
+    continuous: bool = True,
 ) -> list[tuple[float, float, str]]:
     """
     清洗并归一化字幕时间轴：
@@ -92,6 +187,13 @@ def normalize_segments_timeline(
     - 保证时间单调递增
     - 修正异常区间（end <= start）
     - 限制过短/过长片段时长
+    - continuous=True 时，让每段字幕延续到下一段开始（无缝衔接）
+
+    Args:
+        segments: [(start, end, text), ...]
+        min_duration_s: 最小片段时长
+        max_duration_s: 最大片段时长
+        continuous: 是否让字幕连续显示（前一段 end = 下一段 start）
     """
     cleaned: list[tuple[float, float, str]] = []
     for start, end, text in segments:
@@ -115,7 +217,7 @@ def normalize_segments_timeline(
     normalized: list[tuple[float, float, str]] = []
     cursor = max(0.0, cleaned[0][0])
 
-    for start, end, text in cleaned:
+    for i, (start, end, text) in enumerate(cleaned):
         start = max(start, cursor)
         duration = end - start
 
@@ -126,6 +228,21 @@ def normalize_segments_timeline(
 
         normalized.append((round(start, 3), round(end, 3), text))
         cursor = end
+
+    # 让字幕连续显示：每段的 end = 下一段的 start
+    if continuous and len(normalized) > 1:
+        continuous_segments = []
+        for i, (start, end, text) in enumerate(normalized):
+            if i < len(normalized) - 1:
+                # 非最后一段：end 设为下一段的 start
+                next_start = normalized[i + 1][0]
+                # 确保 end 不超过下一段 start，且不小于当前 start
+                end = max(start + min_duration_s, min(end, next_start))
+                # 如果 end 小于 next_start，扩展到 next_start
+                if end < next_start:
+                    end = next_start
+            continuous_segments.append((round(start, 3), round(end, 3), text))
+        normalized = continuous_segments
 
     return normalized
 
@@ -145,17 +262,22 @@ def s_to_srt_time(seconds: float) -> str:
     return ms_to_srt_time(seconds * 1000)
 
 
-def segments_to_srt(segments: list[tuple], normalize: bool = True) -> str:
+def segments_to_srt(segments: list[tuple], normalize: bool = True, wrap: bool = False, is_translated: bool = False) -> str:
     """
     将 segments 转为 SRT 字符串。
 
     Args:
         segments: [(start_s, end_s, text), ...] start/end 单位为秒
+        normalize: 是否规范化时间轴
+        wrap: 是否启用自动换行（中文25字/外文20词）
+        is_translated: 是否为翻译后的文本（影响换行判断）
 
     Returns:
         SRT 格式字符串
     """
     segments = normalize_segments_timeline(segments) if normalize else segments
+    if wrap:
+        segments = wrap_segments_text(segments, is_translated=is_translated)
     lines = []
     index = 1
     for start, end, text in segments:
@@ -249,19 +371,27 @@ def format_speaker_script(segments: list[tuple]) -> str:
 
 
 def save_srt(
-    segments: list[tuple], output_path: str = None, normalize: bool = True
+    segments: list[tuple], output_path: str = None, normalize: bool = True, wrap: bool = False, is_translated: bool = False
 ) -> str:
-    """保存 SRT 文件，返回文件路径"""
+    """保存 SRT 文件，返回文件路径
+
+    Args:
+        segments: 字幕片段列表
+        output_path: 输出路径，None 则创建临时文件
+        normalize: 是否规范化时间轴
+        wrap: 是否启用自动换行（中文25字/外文20词）
+        is_translated: 是否为翻译后的文本
+    """
     if output_path is None:
         tmp = tempfile.NamedTemporaryFile(
             suffix=".srt", prefix="v2t_", delete=False, mode="w", encoding="utf-8"
         )
         output_path = tmp.name
-        tmp.write(segments_to_srt(segments, normalize=normalize))
+        tmp.write(segments_to_srt(segments, normalize=normalize, wrap=wrap, is_translated=is_translated))
         tmp.close()
     else:
         with open(output_path, "w", encoding="utf-8") as f:
-            f.write(segments_to_srt(segments, normalize=normalize))
+            f.write(segments_to_srt(segments, normalize=normalize, wrap=wrap, is_translated=is_translated))
     return output_path
 
 

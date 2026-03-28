@@ -1,13 +1,15 @@
-# video2text Dockerfile (v0.2.1)
-# Supports NVIDIA GPU acceleration with cu121 (Tesla P4 / Pascal / Volta compatible)
-# https://github.com/your-repo/video2text
+# video2text GPU Dockerfile - Ultra Optimized v0.2.3
+# 基于 PyTorch 官方 runtime 镜像，单阶段构建
+# 预估大小：~6-7GB
 
-FROM python:3.12-slim-bookworm
+FROM pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     HF_HOME=/app/.cache/huggingface \
+    HF_ENDPOINT=https://hf-mirror.com \
     MODELSCOPE_CACHE=/app/.cache/modelscope \
     TORCH_HOME=/app/.cache/torch \
     GRADIO_ANALYTICS_ENABLED=false \
@@ -16,31 +18,34 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        bash \
-        build-essential \
-        ca-certificates \
-        curl \
-        ffmpeg \
-        git \
-    && rm -rf /var/lib/apt/lists/*
+# 安装系统依赖
+RUN sed -i "s/archive.ubuntu.com/mirrors.tuna.tsinghua.edu.cn/g" /etc/apt/sources.list && \
+    apt-get update && apt-get install -y --no-install-recommends \
+        build-essential gcc git ffmpeg \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /tmp/*
 
+# 创建缓存目录
+RUN mkdir -p /app/.cache/huggingface /app/.cache/modelscope /app/.cache/torch /app/workspace
+
+# 复制项目文件
 COPY pyproject.toml README.md ./
 COPY backend ./backend
 COPY utils ./utils
+
+# 安装 Python 依赖（PyTorch 已在基础镜像中）
+RUN pip install -i https://pypi.tuna.tsinghua.edu.cn/simple . && \
+    find /opt/conda -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true && \
+    rm -rf /root/.cache/pip /tmp/*
+
+# 下载 paraformer-zh 核心模型（~1GB）
+COPY scripts/download_models.py /tmp/
+RUN python /tmp/download_models.py && rm -rf /tmp/download_models.py
+
+# 复制应用代码
 COPY fastapi_app.py main.py main.sh .env.example ./
-
-RUN python -m pip install --upgrade pip setuptools wheel \
-    && python -m pip install \
-        --index-url https://download.pytorch.org/whl/cu121 \
-        torch==2.3.1 \
-        torchaudio==2.3.1 \
-    && python -m pip install -e .
-
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
-RUN chmod +x /app/docker-entrypoint.sh \
-    && mkdir -p /app/workspace /app/.cache/huggingface /app/.cache/modelscope /app/.cache/torch
+
+RUN chmod +x /app/docker-entrypoint.sh /app/main.sh
 
 EXPOSE 7881
 

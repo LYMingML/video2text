@@ -16,3 +16,8 @@ workspace
 certs
 video2text.pem
 video2text-key.pem
+data
+.cache
+nohup.out
+app.log
+video2text-rs

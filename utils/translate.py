@@ -15,6 +15,7 @@ import re
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable
 
 from utils.online_models import load_profiles
@@ -47,6 +48,30 @@ def _load_dotenv(path: str):
 
 
 _load_dotenv(_ENV_PATH)
+
+
+def _get_parallel_threads() -> int:
+    """获取翻译并行线程数配置，默认 5。"""
+    try:
+        val = os.environ.get("TRANSLATE_PARALLEL_THREADS", "5").strip()
+        return max(1, min(50, int(val)))
+    except Exception:
+        return 5
+
+
+_TRANSLATE_PARALLEL_THREADS = _get_parallel_threads()
+
+
+def set_parallel_threads(n: int):
+    """动态设置翻译并行线程数。"""
+    global _TRANSLATE_PARALLEL_THREADS
+    _TRANSLATE_PARALLEL_THREADS = max(1, min(50, int(n)))
+
+
+def get_parallel_threads() -> int:
+    """获取当前翻译并行线程数。"""
+    return _TRANSLATE_PARALLEL_THREADS
+
 
 def _load_default_online_config() -> tuple[str, str, str]:
     try:
@@ -367,40 +392,63 @@ def _translate_segments_with_siliconflow(
     use_model_name = _resolve_model_name(model_name or _DEFAULT_MODEL, use_base_url, use_api_key)
 
     if log_cb:
-        log_cb(f"[TRANS] 使用在线模型: {use_model_name}")
+        log_cb(f"[TRANS] 使用在线模型: {use_model_name}, 并行线程: {_TRANSLATE_PARALLEL_THREADS}")
 
-    translated: list[tuple[float, float, str]] = []
     total = len(segments)
+    if total == 0:
+        return []
+
     t0 = time.time()
-    for idx, (start, end, text) in enumerate(segments, start=1):
+    results: list[tuple[int, float, float, str]] = [None] * total  # type: ignore
+    completed_count = [0]  # 使用列表以便在闭包中修改
+
+    def translate_one(idx: int, start: float, end: float, text: str) -> tuple[int, float, float, str]:
+        """翻译单个片段"""
         line = _normalize_line(text)
         if not line:
-            translated.append((start, end, ""))
-            continue
+            return (idx, start, end, "")
 
-        try:
-            zh_text = _translate_line_with_siliconflow(
-                line,
-                source_lang=source_lang,
-                target_lang=target_lang,
-                model_name=use_model_name,
-                base_url=use_base_url,
-                api_key=use_api_key,
-            )
-        except Exception as exc:
-            raise RuntimeError(f"硅基流动翻译调用失败: {exc}") from exc
-
+        zh_text = _translate_line_with_siliconflow(
+            line,
+            source_lang=source_lang,
+            target_lang=target_lang,
+            model_name=use_model_name,
+            base_url=use_base_url,
+            api_key=use_api_key,
+        )
         zh_line = _normalize_line(zh_text) or line
-        translated.append((start, end, zh_line))
+        return (idx, start, end, zh_line)
 
-        elapsed = max(0.001, time.time() - t0)
-        avg_per_seg = elapsed / idx
-        eta = max(0.0, (total - idx) * avg_per_seg)
-        if progress_cb:
-            progress_cb(idx, total, eta)
+    # 使用线程池并行翻译
+    with ThreadPoolExecutor(max_workers=_TRANSLATE_PARALLEL_THREADS) as executor:
+        futures = {}
+        for idx, (start, end, text) in enumerate(segments):
+            future = executor.submit(translate_one, idx, start, end, text)
+            futures[future] = idx
 
-        if log_cb and (idx == total or idx % 20 == 0):
-            log_cb(f"[TRANS] 翻译进度: {idx}/{total}")
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                results[result[0]] = result
+                completed_count[0] += 1
+
+                # 更新进度
+                elapsed = max(0.001, time.time() - t0)
+                avg_per_seg = elapsed / completed_count[0]
+                eta = max(0.0, (total - completed_count[0]) * avg_per_seg)
+                if progress_cb:
+                    progress_cb(completed_count[0], total, eta)
+
+                if log_cb and (completed_count[0] == total or completed_count[0] % 20 == 0):
+                    log_cb(f"[TRANS] 翻译进度: {completed_count[0]}/{total}")
+            except Exception as exc:
+                raise RuntimeError(f"翻译调用失败: {exc}") from exc
+
+    # 按原始顺序构建结果
+    translated: list[tuple[float, float, str]] = []
+    for r in results:
+        if r is not None:
+            translated.append((r[1], r[2], r[3]))
 
     return translated
 

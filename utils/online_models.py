@@ -15,6 +15,8 @@ APP_SETTINGS_DEFAULTS = {
     "DEFAULT_FUNASR_MODEL": "paraformer-zh ⭐ 普通话精度推荐",
     "DEFAULT_WHISPER_MODEL": "medium",
     "AUTO_SUBTITLE_LANG": "zh",
+    "FFMPEG_THREADS": "4",  # FFmpeg 音频提取线程数
+    "FUNASR_BATCH_SIZE_S": "300",  # FunASR 每批处理秒数
 }
 
 

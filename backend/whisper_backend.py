@@ -1,22 +1,85 @@
 """
 faster-whisper 后端
-使用 CTranslate2 CUDA 推理，支持 Tesla P4 sm_61
+使用 CTranslate2 推理，支持 CUDA 和 CPU
 
-CTranslate2 在 sm_61 (Pascal) 上支持的 compute_type：
+GPU 加速选项：
+  - CUDA:  CTranslate2 原生支持 NVIDIA GPU
+           注意：CTranslate2 CUDA 独立于 PyTorch，可支持 sm_61 (Tesla P4)
+  - CPU:   通用回退，使用 int8 量化
+
+CTranslate2 在 sm_61 (Pascal, 如 Tesla P4) 上支持的 compute_type：
   ✅ int8           - 推荐，最节省显存
   ✅ int8_float32   - 兼容 sm_61
   ✅ float32        - 精度最高但最慢
   ❌ float16        - 需要 Volta+ (sm_70)
   ❌ int8_float16   - 需要 Volta+ (sm_70)
 
-PyTorch 要求：torch==2.3.1+cu121（支持 sm_61；2.4+ 最低 sm_70）
+注意：CTranslate2 不支持 Intel GPU (OpenCL)
+      如需 Intel GPU 加速，考虑使用 whisper.cpp (OpenCL 后端)
 """
 
 from __future__ import annotations
 import logging
+import re
 from typing import Callable
 
 logger = logging.getLogger(__name__)
+
+# Whisper 幻觉/水印清理模式
+_HALLUCINATION_PATTERNS = [
+    re.compile(r"\[cite:\s*\d+\]", re.IGNORECASE),
+    re.compile(r"\[citation:\s*\d+\]", re.IGNORECASE),
+    re.compile(r"\(cite:\s*\d+\)", re.IGNORECASE),
+    re.compile(r"subtitle\s*by\s*.*$", re.IGNORECASE),
+]
+
+
+def _clean_hallucinations(text: str) -> str:
+    """清理 Whisper 幻觉输出（水印、引用标记等）。"""
+    cleaned = text
+    for pattern in _HALLUCINATION_PATTERNS:
+        cleaned = pattern.sub("", cleaned)
+    return cleaned.strip()
+
+
+def _fix_time_gaps(
+    segments: list[tuple[float, float, str]],
+    max_gap_seconds: float = 300.0,
+    avg_char_duration: float = 0.15,
+) -> list[tuple[float, float, str]]:
+    """
+    修复时间跳跃过大的问题。
+
+    当检测到相邻字幕之间的时间跳跃超过 max_gap_seconds 时：
+    - 重新估算时间戳，使其连续
+    """
+    if len(segments) < 2:
+        return segments
+
+    fixed: list[tuple[float, float, str]] = []
+    cursor = segments[0][0]
+
+    for start, end, text in segments:
+        gap = start - cursor
+
+        if gap > max_gap_seconds:
+            logger.warning(
+                f"检测到时间跳跃: {gap:.0f}s ({gap/60:.1f}min)，"
+                f"从 {cursor:.1f}s 跳到 {start:.1f}s，重新估算"
+            )
+            est_duration = max(1.0, min(10.0, len(text) * avg_char_duration))
+            fixed.append((round(cursor, 3), round(cursor + est_duration, 3), text))
+            cursor = cursor + est_duration
+        else:
+            if start < cursor:
+                start = cursor
+                duration = max(1.0, len(text) * avg_char_duration)
+                end = start + duration
+            fixed.append((round(start, 3), round(end, 3), text))
+            cursor = max(cursor, end)
+
+    return fixed
+
 
 _model_cache: dict = {}  # {(model_name, device, compute_type): WhisperModel}
 
@@ -122,6 +185,8 @@ def transcribe(
 
     for seg in segments_iter:
         text = seg.text.strip()
+        # 清理幻觉/水印
+        text = _clean_hallucinations(text)
         if text:
             results.append((seg.start, seg.end, text))
         # 粗略进度：按已处理时长估算
@@ -131,6 +196,9 @@ def transcribe(
 
     if progress_cb:
         progress_cb(1.0, f"完成，共 {len(results)} 条字幕")
+
+    # 修复时间跳跃（超过 5 分钟的跳跃）
+    results = _fix_time_gaps(results, max_gap_seconds=300.0)
 
     return results
 
