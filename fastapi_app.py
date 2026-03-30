@@ -2201,7 +2201,7 @@ function updateTextFileSelectionState(){
     const stateEl = document.getElementById('fileTextSelectionState');
     if(!stateEl) return;
     if(selectedTextFiles.size === 0){
-        stateEl.textContent = '当前已选：未选择历史文本';
+        stateEl.textContent = '当前已选：未选择输出文件';
     } else if(selectedTextFiles.size === 1){
         stateEl.textContent = `当前已选：${[...selectedTextFiles][0]}`;
     } else {
@@ -2449,7 +2449,7 @@ function syncSelectionStates(){
     );
     setSelectionState('modelSelectionState', (profile || model) ? `当前已选配置：${profile || '未选择'} ｜ 模型：${model || '未选择'}` : '当前已选：未选择配置组与模型');
     setSelectionState('fileFolderSelectionState', folder ? `当前已选文件夹：${folder}` : '当前已选：未选择历史文件夹');
-    setSelectionState('fileTextSelectionState', textFile ? `当前已选文本：${textFile}` : '当前已选：未选择历史文本');
+    setSelectionState('fileTextSelectionState', textFile ? `当前已选文本：${textFile}` : '当前已选：未选择输出文件');
     setSelectionState('homeSummaryBackend', backend || '未选择');
     setSelectionState('homeSummaryBackendModel', backendModel || '未选择');
     setSelectionState('homeSummaryTranslate', homeModel || '未选择');
