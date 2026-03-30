@@ -92,6 +92,7 @@ def _get_model(
     """懒加载并缓存 WhisperModel 实例"""
     key = (model_name, device, compute_type)
     if key in _model_cache:
+        logger.info(f"[Whisper] 使用缓存模型: {model_name} on {device} ({compute_type})")
         return _model_cache[key]
 
     try:
@@ -102,7 +103,7 @@ def _get_model(
             "  pip install faster-whisper stable-ts"
         )
 
-    logger.info(f"加载 Whisper 模型: {model_name} ({compute_type}) on {device}")
+    logger.info(f"[Whisper] 加载模型: {model_name}, device={device}, compute_type={compute_type}")
 
     # Tesla P4 (sm_61) 只支持 int8，不支持 float16 / int8_float16
     # 自动回退策略：float16 → int8_float16 → int8 → cpu int8
@@ -112,21 +113,33 @@ def _get_model(
 
     model = None
     used_type = compute_type
+    used_device = device
     for ct in fallback_chain:
         try:
+            logger.info(f"[Whisper] 尝试: device={device}, compute_type={ct}")
             model = WhisperModel(model_name, device=device, compute_type=ct)
             used_type = ct
             break
         except Exception as e:
-            logger.warning(f"compute_type={ct} 加载失败: {e}，尝试下一个...")
+            logger.warning(f"[Whisper] device={device}, compute_type={ct} 加载失败: {e}")
 
     if model is None:
-        logger.warning("GPU 模式全部失败，回退 CPU int8")
+        logger.warning("[Whisper] GPU 加载全部失败，回退 CPU int8")
         model = WhisperModel(model_name, device="cpu", compute_type="int8")
         key = (model_name, "cpu", "int8")
         used_type = "int8"
+        used_device = "cpu"
 
-    logger.info(f"Whisper 模型加载完成 (实际 compute_type={used_type})")
+    # 检测实际运行设备
+    actual_device = used_device
+    try:
+        if hasattr(model, "device"):
+            actual_device = str(model.device)
+    except Exception:
+        pass
+
+    is_gpu = "cuda" in actual_device.lower() or "gpu" in actual_device.lower()
+    logger.info(f"[Whisper] 模型加载完成: device={actual_device}, compute_type={used_type}, 实际设备={'GPU' if is_gpu else 'CPU'}")
     _model_cache[key] = model
     return model
 

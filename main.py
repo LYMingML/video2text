@@ -40,7 +40,7 @@ from utils.subtitle import (
     normalize_segments_timeline,
     collect_plain_text,
 )
-from utils.translate import translate_segments_to_chinese, list_available_models
+from utils.translate import translate_segments_to_chinese, translate_segments, list_available_models
 from utils.online_models import load_profiles, save_profiles, upsert_profile, delete_profile
 
 logging.basicConfig(
@@ -463,32 +463,51 @@ def _has_nvidia_gpu() -> bool:
     visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
     # 空字符串表示"未设置"（应继续探测硬件），只有明确禁用值才跳过
     if visible in {"-1", "none", "None"}:
+        logger.info(f"[GPU] CUDA_VISIBLE_DEVICES={visible!r}，跳过 GPU 检测")
         return False
 
     # 优先检查 torch.cuda（最可靠）
     try:
         import torch
-        if torch.cuda.is_available():
+        avail = torch.cuda.is_available()
+        if avail:
+            device_name = torch.cuda.get_device_name(0) if torch.cuda.device_count() > 0 else "unknown"
+            logger.info(f"[GPU] torch.cuda 检测到 GPU: {device_name}")
             return True
+        else:
+            logger.info("[GPU] torch.cuda.is_available()=False")
     except ImportError:
-        pass
+        logger.info("[GPU] torch 未安装，跳过 torch.cuda 检测")
 
     # 原生 Linux 路径检查
     if os.path.exists("/dev/nvidiactl") or os.path.exists("/proc/driver/nvidia"):
+        logger.info("[GPU] 检测到 /dev/nvidiactl 或 /proc/driver/nvidia")
         return True
+    else:
+        logger.info("[GPU] /dev/nvidiactl 和 /proc/driver/nvidia 均不存在")
 
     # nvidia-smi fallback（WSL2 兼容）
     try:
         result = subprocess.run(
             ["nvidia-smi", "-L"],
             check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=2,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=5,
         )
-        return result.returncode == 0
-    except Exception:
-        return False
+        if result.returncode == 0:
+            gpu_list = result.stdout.decode(errors="replace").strip()
+            logger.info(f"[GPU] nvidia-smi 检测到 GPU: {gpu_list.splitlines()[0] if gpu_list else 'unknown'}")
+            return True
+        else:
+            logger.info(f"[GPU] nvidia-smi 返回非零: {result.returncode}")
+    except FileNotFoundError:
+        logger.info("[GPU] nvidia-smi 未找到")
+    except Exception as e:
+        logger.info(f"[GPU] nvidia-smi 检测异常: {e}")
+
+    logger.info("[GPU] 所有检测均未发现 NVIDIA GPU，将使用 CPU")
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -1021,6 +1040,7 @@ def translate_current_job(
     current_log: str,
     online_profile_name: str,
     online_model_name: str,
+    target_lang: str = "zh",
 ):
     """
     手动翻译当前任务：读取原文字幕，生成中文字幕，再生成下载压缩包。
@@ -1115,9 +1135,10 @@ def translate_current_job(
 
     for idx, seg in enumerate(segments, start=1):
         try:
-            part = translate_segments_to_chinese(
+            part = translate_segments(
                 [seg],
                 source_lang=source_lang,
+                target_lang=target_lang,
                 log_cb=push_log,
                 base_url=use_base_url,
                 api_key=use_api_key,
@@ -1155,12 +1176,13 @@ def translate_current_job(
             file_prefix,
         )
 
+    _norm_target = (target_lang or "zh").strip().lower() or "zh"
     zh_segments = normalize_segments_timeline(translated)
-    # 翻译后的中文字幕启用自动换行（每25个字符）
-    zh_srt_path = save_srt(zh_segments, str(job_dir / f"{file_prefix}.zh.srt"), normalize=False, wrap=True, is_translated=True)
-    zh_txt_path = save_plain(zh_segments, str(job_dir / f"{file_prefix}.zh.txt"), normalize=False)
-    push_log(f"[OUT] 中文 SRT: {Path(zh_srt_path).name}")
-    push_log(f"[OUT] 中文 TXT: {Path(zh_txt_path).name}")
+    # 翻译后的字幕启用自动换行（每25个字符）
+    zh_srt_path = save_srt(zh_segments, str(job_dir / f"{file_prefix}.{_norm_target}.srt"), normalize=False, wrap=True, is_translated=True)
+    zh_txt_path = save_plain(zh_segments, str(job_dir / f"{file_prefix}.{_norm_target}.txt"), normalize=False)
+    push_log(f"[OUT] 翻译 SRT: {Path(zh_srt_path).name}")
+    push_log(f"[OUT] 翻译 TXT: {Path(zh_txt_path).name}")
 
     srt_bundle = _build_all_bundle(job_dir, file_prefix)
     push_log(f"[OUT] 打包: {Path(srt_bundle).name}")
@@ -1694,6 +1716,14 @@ def build_ui() -> gr.Blocks:
                         translate_btn = gr.Button("🌐 翻译", variant="secondary")
                         stop_btn = gr.Button("⏹️ 停止转录", variant="secondary")
                     with gr.Row():
+                        target_lang_sel = gr.Dropdown(
+                            choices=["zh", "en", "ja", "ko", "es", "fr", "de", "ru"],
+                            value="zh",
+                            label="翻译目标语言",
+                            scale=1,
+                            allow_custom_value=True,
+                        )
+                    with gr.Row():
                         srt_download = gr.DownloadButton("下载SRT字幕", value=None)
                         txt_download = gr.DownloadButton("下载纯文本", value=None)
 
@@ -1875,6 +1905,7 @@ def build_ui() -> gr.Blocks:
                 log_output,
                 online_profile_select,
                 online_model_select,
+                target_lang_sel,
             ],
             outputs=[
                 status_text,

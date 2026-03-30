@@ -18,30 +18,28 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 WORKDIR /app
 
-# 安装系统依赖
+# 1. 安装系统依赖（变化极少，缓存命中率最高）
 RUN sed -i "s/archive.ubuntu.com/mirrors.tuna.tsinghua.edu.cn/g" /etc/apt/sources.list && \
     apt-get update && apt-get install -y --no-install-recommends \
         build-essential gcc git ffmpeg \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /tmp/*
 
-# 创建缓存目录
+# 2. 创建缓存目录
 RUN mkdir -p /app/.cache/huggingface /app/.cache/modelscope /app/.cache/torch /app/workspace
 
-# 复制项目文件
+# 3. Python 依赖安装（COPY pyproject.toml + backend + utils，pip install 需要这些包）
 COPY pyproject.toml README.md ./
 COPY backend ./backend
 COPY utils ./utils
-
-# 安装 Python 依赖（PyTorch 已在基础镜像中）
 RUN pip install -i https://pypi.tuna.tsinghua.edu.cn/simple . && \
     find /opt/conda -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true && \
     rm -rf /root/.cache/pip /tmp/*
 
-# 下载 paraformer-zh 核心模型（~1GB）
+# 4. 下载 paraformer-zh 核心模型（~1GB，依赖 pip install 的 funasr/modelscope）
 COPY scripts/download_models.py /tmp/
 RUN python /tmp/download_models.py && rm -rf /tmp/download_models.py
 
-# 复制应用代码
+# 5. 应用代码（变更最频繁，放在最后以最大化缓存利用）
 COPY fastapi_app.py main.py main.sh .env.example ./
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 

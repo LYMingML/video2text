@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import base64
-import json
 import io
+import json
+import logging
 import re
 import shutil
 import subprocess
@@ -206,9 +207,14 @@ def _resolve_external_input(payload: dict[str, Any], auto_subtitle_lang: str) ->
 
 def _get_job(job_id: str) -> JobState:
     global _RUNTIME_JOB
-    if not _RUNTIME_JOB or _RUNTIME_JOB.job_id != job_id:
+    if _RUNTIME_JOB and _RUNTIME_JOB.job_id == job_id:
+        return _RUNTIME_JOB
+    # 也从 _ALL_JOBS 中查找排队中/已完成的任务
+    with _RUNTIME_LOCK:
+        job = _ALL_JOBS.get(job_id)
+    if not job:
         raise HTTPException(status_code=404, detail="job not found")
-    return _RUNTIME_JOB
+    return job
 
 
 def _set_job_state(job: JobState):
@@ -222,9 +228,10 @@ def _json_job(job: JobState) -> dict[str, Any]:
     tp = job.translate_params or {}
     backend = tp.get("backend", "")
     model_name = ""
-    if backend == "funasr":
+    backend_lower = backend.lower()
+    if "funasr" in backend_lower:
         model_name = tp.get("funasr_model", "")
-    elif backend == "whisper":
+    elif "whisper" in backend_lower:
         model_name = tp.get("whisper_model", "")
     model_info = ""
     if backend:
@@ -463,8 +470,9 @@ def _run_transcribe_worker(
 
         if core.STOP_EVENT.is_set():
             _set_job_progress(job, "🛑 已停止（未生成字幕文件）", t0, progress_pct=0, eta_seconds=0, step_label="已停止")
-            job.done = True
-            job.running = False
+            with _RUNTIME_LOCK:
+                job.done = True
+                job.running = False
             return
 
         lang_code = core._parse_lang_code(language)
@@ -553,12 +561,6 @@ def _build_all_bundle(job_dir: Path, file_prefix: str) -> str:
     with zipfile.ZipFile(bundle_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         for f in files:
             zf.write(f, arcname=f.name)
-    # 打包完成后自动删除已打包的 .srt/.txt 文件
-    for f in files:
-        try:
-            f.unlink()
-        except OSError:
-            pass
     return str(bundle_path)
 
 
@@ -709,12 +711,14 @@ def _run_subtitle_import_worker(job: JobState, media_path: str, subtitle_path: s
             eta_seconds=0,
             step_label="自动字幕完成",
         )
-        job.done = True
-        job.running = False
+        with _RUNTIME_LOCK:
+            job.done = True
+            job.running = False
     except Exception as exc:
-        job.failed = True
-        job.done = True
-        job.running = False
+        with _RUNTIME_LOCK:
+            job.failed = True
+            job.done = True
+            job.running = False
         _set_job_progress(job, f"❌ 自动字幕导入失败: {exc}", t0, progress_pct=0, eta_seconds=0, step_label="导入失败")
         job.add_log(f"[ERROR] {exc}")
 
@@ -1366,28 +1370,29 @@ button:hover{transform:translateY(-1px);background:#ecfaf4}
             </article>
 
             <article class="card panel-right stack">
-                <h3>下载历史文本</h3>
-                <p class="muted">选中文件夹后，可浏览其中的 `.txt` 文件，多选后打包下载为 ZIP。</p>
+                <h3>下载输出文件</h3>
+                <p class="muted">选中文件夹后，可浏览其中的 ZIP/字幕/文本等输出文件，支持多选下载。</p>
                 <div class="field compact">
-                    <label for="textFileSearch">搜索历史文本</label>
-                    <input id="textFileSearch" placeholder="输入关键字筛选文本文件" oninput="applyTextFileFilter()" />
+                    <label for="textFileSearch">搜索输出文件</label>
+                    <input id="textFileSearch" placeholder="输入关键字筛选文件" oninput="applyTextFileFilter()" />
                 </div>
-                <div id="fileTextSelectionState" class="selection-hint">当前已选：未选择历史文本</div>
+                <div id="fileTextSelectionState" class="selection-hint">当前已选：未选择输出文件</div>
                 <select id="textFileSelect" style="display:none;"></select>
                 <div class="field" style="flex:1;display:flex;flex-direction:column;min-height:0">
-                    <label>全部历史文本</label>
+                    <label>全部输出文件</label>
                     <div class="file-table-container">
                         <div class="file-table-header">
                             <div class="file-table-col col-check"><input type="checkbox" id="textFileCheckAll" onclick="toggleSelectAllTextFiles()"/></div>
                             <div class="file-table-col col-name sortable" onclick="sortTextFiles('name')">文件名 <span class="sort-indicator" id="textFileSortName"></span></div>
                             <div class="file-table-col col-time sortable" onclick="sortTextFiles('time')">修改时间 <span class="sort-indicator" id="textFileSortTime"></span></div>
+                            <div class="file-table-col col-size">大小</div>
                         </div>
                         <div id="textFileListContainer" class="file-table-body"></div>
                     </div>
                 </div>
                 <div class="toolbar">
-                    <button onclick="refreshTextFiles()">刷新文本列表</button>
-                    <button onclick="downloadSelectedTextFiles()">下载选中文本 ZIP</button>
+                    <button onclick="refreshTextFiles()">刷新文件列表</button>
+                    <button onclick="downloadSelectedTextFiles()">下载选中的文件</button>
                 </div>
             </article>
         </section>
@@ -1549,6 +1554,7 @@ const APP_DEFAULTS = {
 
 let currentJobId = "";
 let pollTimer = null;
+let _prevJobState = { current_job:'', step_label:'', done:false };
 let pendingAutoFlags = { translate: false, download: false };
 let foldersList = [];
 let foldersListMeta = [];  // 文件夹元数据 [{name, mtime, size}]
@@ -2131,9 +2137,15 @@ function renderTextFileList(){
         timeCol.className = 'file-table-col col-time';
         timeCol.textContent = formatDateTime(mtime);
 
+        // 大小列
+        const sizeCol = document.createElement('div');
+        sizeCol.className = 'file-table-col col-size';
+        sizeCol.textContent = formatSize(item.size || 0);
+
         row.appendChild(checkCol);
         row.appendChild(nameCol);
         row.appendChild(timeCol);
+        row.appendChild(sizeCol);
 
         row.onclick = (e) => handleTextFileClick(fileName, e, index);
         container.appendChild(row);
@@ -2221,7 +2233,7 @@ function toggleSelectAllTextFiles(){
 
 async function downloadSelectedTextFiles(){
     if(selectedTextFiles.size === 0){
-        alert('请先选择要下载的文本文件');
+        alert('请先选择要下载的文件');
         return;
     }
 
@@ -2232,7 +2244,7 @@ async function downloadSelectedTextFiles(){
     }
 
     const fileNames = [...selectedTextFiles];
-    const url = '/api/folders/download-selected-text?folder_name=' + encodeURIComponent(folder) +
+    const url = '/api/folders/download-output?folder_name=' + encodeURIComponent(folder) +
                 '&files=' + encodeURIComponent(fileNames.join(','));
     window.open(url, '_blank');
 }
@@ -2803,10 +2815,10 @@ async function refreshTextFiles(){
         return;
     }
     try{
-        const data = await api('/api/folders/text-files?folder_name='+encodeURIComponent(folder));
-        textFilesMeta = Array.isArray(data.text_files_meta)
-            ? data.text_files_meta.map(item=>({name:item.name, mtime:Number(item.mtime || 0)}))
-            : (data.text_files || []).map(name=>({name, mtime:0}));
+        const data = await api('/api/folders/output-files?folder_name='+encodeURIComponent(folder));
+        textFilesMeta = Array.isArray(data.files)
+            ? data.files.map(item=>({name:item.name, mtime:Number(item.mtime || 0), size:Number(item.size || 0)}))
+            : [];
         const names = textFilesMeta.map(item=>item.name);
         setHiddenSelectOptions('textFileSelect', names, '');
         selectedTextFiles.clear();
@@ -2815,7 +2827,7 @@ async function refreshTextFiles(){
         updateTextFileSelectionState();
         syncSelectionStates();
     }catch(e){
-        console.error('文本列表获取失败', e);
+        console.error('文件列表获取失败', e);
         textFilesMeta = [];
         selectedTextFiles.clear();
         lastClickedTextFile = null;
@@ -3121,6 +3133,7 @@ async function startTranslate(){
 
 function startPoll(){
     if(pollTimer) clearInterval(pollTimer);
+    _prevJobState = { current_job:'', step_label:'', done:false };
     pollTimer = setInterval(async ()=>{
         if(!currentJobId) return;
         try{
@@ -3129,22 +3142,46 @@ function startPoll(){
             document.getElementById('plainText').value = data.plain_text || '';
             document.getElementById('logText').value = data.log_text || '';
             updateTaskPanel(data);
-            if(data.done && !data.running){
+
+            // 事件驱动：仅在状态变化时刷新 UI
+            const jobChanged = data.current_job && data.current_job !== _prevJobState.current_job;
+            const stepChanged = data.step_label && data.step_label !== _prevJobState.step_label;
+            const justDone = data.done && !data.running && !_prevJobState.done;
+
+            if(jobChanged && data.current_job && data.current_prefix){
+                // 任务目录确定（音频即将提取）→ 刷新历史记录，更新音频路径
+                const expectedWav = `workspace/${data.current_job}/${data.current_prefix}.wav`;
+                refreshHistory(expectedWav);
+            }
+            if(stepChanged){
+                // 步骤变化（提取音频→转录→翻译）→ 刷新队列
+                refreshQueueStatus();
+            }
+
+            _prevJobState = {
+                current_job: data.current_job || '',
+                step_label: data.step_label || '',
+                done: !!data.done,
+            };
+
+            if(justDone){
+                // 任务完成 → 最终刷新
                 const preferredWav = (data.current_job && data.current_prefix)
                     ? `workspace/${data.current_job}/${data.current_prefix}.wav`
                     : '';
                 await refreshHistory(preferredWav);
+                refreshQueueStatus();
                 clearInterval(pollTimer);
                 pollTimer = null;
                 // 自动翻译
                 if(pendingAutoFlags.translate && !data.failed){
                   pendingAutoFlags.translate = false;
-                  startTranslate();
+                  try{ await startTranslate(); }catch(e){ console.error('自动翻译失败', e); }
                 }
                 // 自动下载 ZIP
                 if(pendingAutoFlags.download && !data.failed){
                   pendingAutoFlags.download = false;
-                  downloadOutputZip();
+                  try{ await downloadOutputZip(); }catch(e){ console.error('自动下载失败', e); }
                 }
             }
         }catch(e){ console.error(e); }
@@ -3351,7 +3388,66 @@ def api_download_selected_text_files(folder_name: str, files: str):
     return StreamingResponse(buffer, media_type="application/zip", headers=headers)
 
 
-@app.get("/api/settings/temp-files")
+@app.get("/api/folders/output-files")
+def api_folder_output_files(folder_name: str):
+    """返回选中文件夹内的输出文件列表（ZIP/SRT/TXT/WAV 等）"""
+    folder = _resolve_workspace_folder(folder_name)
+    _OUTPUT_EXTS = {".zip", ".srt", ".txt", ".wav", ".vtt"}
+    entries = []
+    for p in sorted(folder.iterdir(), key=lambda x: x.name.lower()):
+        if not p.is_file() or p.suffix.lower() not in _OUTPUT_EXTS:
+            continue
+        try:
+            mtime = p.stat().st_mtime
+            size = p.stat().st_size
+            size_mb = size / (1024 * 1024)
+        except OSError:
+            mtime = 0.0
+            size_mb = 0
+        entries.append({"name": p.name, "mtime": int(mtime), "size": size_mb})
+    return {"folder_name": folder.name, "files": entries}
+
+
+@app.get("/api/folders/download-output")
+def api_download_output_files(folder_name: str, files: str):
+    """下载选中文件夹内指定的输出文件（多文件打包为 ZIP，单文件直接下载）"""
+    folder = _resolve_workspace_folder(folder_name)
+    _OUTPUT_EXTS = {".zip", ".srt", ".txt", ".wav", ".vtt"}
+
+    file_names = [f.strip() for f in files.split(",") if f.strip()]
+    if not file_names:
+        raise HTTPException(status_code=400, detail="未指定要下载的文件")
+
+    output_files = []
+    for name in file_names:
+        file_path = folder / name
+        if not file_path.exists() or not file_path.is_file():
+            continue
+        if file_path.suffix.lower() not in _OUTPUT_EXTS:
+            continue
+        try:
+            file_path.resolve().relative_to(folder.resolve())
+        except ValueError:
+            continue
+        output_files.append(file_path)
+
+    if not output_files:
+        raise HTTPException(status_code=404, detail="未找到有效的输出文件")
+
+    # 单个文件直接下载
+    if len(output_files) == 1:
+        return FileResponse(str(output_files[0]), filename=output_files[0].name)
+
+    # 多个文件打包为 ZIP
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for f in output_files:
+            zf.write(f, arcname=f.name)
+    buffer.seek(0)
+
+    zip_name = f"{folder.name}.selected.zip"
+    headers = {"Content-Disposition": f'attachment; filename="{zip_name}"'}
+    return StreamingResponse(buffer, media_type="application/zip", headers=headers)
 def api_get_temp_file_settings():
     """获取临时文件保留数量设置"""
     return {
