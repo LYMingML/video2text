@@ -403,6 +403,30 @@ def _set_job_progress(
     job.updated_at = time.time()
 
 
+def _cleanup_old_text_files():
+    """自动清理超过1天的非zip文本文件（srt/txt/vtt/wav）"""
+    _KEEP_EXTS = {".zip"}
+    _TEXT_EXTS = {".srt", ".txt", ".vtt", ".wav"}
+    cutoff = time.time() - 86400  # 1 day
+    cleaned = 0
+    for folder in core.WORKSPACE_DIR.iterdir():
+        if not folder.is_dir():
+            continue
+        for p in list(folder.iterdir()):
+            if not p.is_file():
+                continue
+            ext = p.suffix.lower()
+            if ext not in _TEXT_EXTS:
+                continue
+            try:
+                if p.stat().st_mtime < cutoff:
+                    p.unlink()
+                    cleaned += 1
+            except OSError:
+                pass
+    return cleaned
+
+
 def _resolve_workspace_folder(folder_name: str) -> Path:
     name = (folder_name or "").strip()
     if not name:
@@ -1009,6 +1033,7 @@ body{
 .file-table-header .file-table-col{padding:3px 4px;font-size:11px;font-weight:700;color:#31473a;line-height:1.1}
 .file-table-col.col-check{width:24px;text-align:center;flex-shrink:0}
 .file-table-col.col-name{flex:2;min-width:100px}
+.file-table-col.col-folder{flex:1;min-width:80px}
 .file-table-col.col-time{width:110px;flex-shrink:0}
 .file-table-col.col-size{width:80px;flex-shrink:0;text-align:right}
 .file-table-col.sortable{cursor:pointer;user-select:none}
@@ -1371,7 +1396,12 @@ button:hover{transform:translateY(-1px);background:#ecfaf4}
 
             <article class="card panel-right stack">
                 <h3>下载输出文件</h3>
-                <p class="muted">选中文件夹后，可浏览其中的 ZIP/字幕/文本等输出文件，支持多选下载。</p>
+                <p class="muted">选中文件夹后浏览文件，或切换到全部文件夹视图查看所有 ZIP</p>
+                <div class="toolbar" style="gap:6px;flex-wrap:wrap;align-items:center;">
+                    <button id="toggleAllFilesBtn" onclick="toggleAllFilesView()">显示全部文件夹</button>
+                    <button onclick="refreshCurrentFileView()">刷新文件列表</button>
+                    <button onclick="downloadSelectedTextFiles()">下载选中的文件</button>
+                </div>
                 <div class="field compact">
                     <label for="textFileSearch">搜索输出文件</label>
                     <input id="textFileSearch" placeholder="输入关键字筛选文件" oninput="applyTextFileFilter()" />
@@ -1379,20 +1409,17 @@ button:hover{transform:translateY(-1px);background:#ecfaf4}
                 <div id="fileTextSelectionState" class="selection-hint">当前已选：未选择输出文件</div>
                 <select id="textFileSelect" style="display:none;"></select>
                 <div class="field" style="flex:1;display:flex;flex-direction:column;min-height:0">
-                    <label>全部输出文件</label>
+                    <label id="textFileListLabel">全部输出文件</label>
                     <div class="file-table-container">
                         <div class="file-table-header">
                             <div class="file-table-col col-check"><input type="checkbox" id="textFileCheckAll" onclick="toggleSelectAllTextFiles()"/></div>
+                            <div id="textFileFolderCol" class="file-table-col col-folder" style="display:none;">文件夹 <span class="sort-indicator" id="textFileSortFolder"></span></div>
                             <div class="file-table-col col-name sortable" onclick="sortTextFiles('name')">文件名 <span class="sort-indicator" id="textFileSortName"></span></div>
                             <div class="file-table-col col-time sortable" onclick="sortTextFiles('time')">修改时间 <span class="sort-indicator" id="textFileSortTime"></span></div>
                             <div class="file-table-col col-size">大小</div>
                         </div>
                         <div id="textFileListContainer" class="file-table-body"></div>
                     </div>
-                </div>
-                <div class="toolbar">
-                    <button onclick="refreshTextFiles()">刷新文件列表</button>
-                    <button onclick="downloadSelectedTextFiles()">下载选中的文件</button>
                 </div>
             </article>
         </section>
@@ -1571,6 +1598,8 @@ let profileNamesList = [];
 let folderFilterKeyword = '';
 let textFileFilterKeyword = '';
 let profileFilterKeyword = '';
+let showAllFoldersFiles = false;  // 全部文件夹视图开关
+let allFilesMeta = [];           // 全部文件夹文件元数据 [{folder, name, mtime, size}]
 let lastSavedAutoSubtitleLang = APP_DEFAULTS.autoSubtitleLang;
 const HOME_FUNASR_MODELS = [
     {value:'paraformer-zh', name:'paraformer-zh', feature:'普通话精度推荐'},
@@ -2100,11 +2129,15 @@ function renderTextFileList(){
 
     filtered.forEach((item, index) => {
         const fileName = item.name;
+        const folderName = item.folder || '';
+        const fileKey = folderName ? (folderName + '/' + fileName) : fileName;
         const mtime = item.mtime || 0;
 
         const row = document.createElement('div');
-        row.className = 'file-table-row' + (selectedTextFiles.has(fileName) ? ' selected' : '');
-        row.dataset.value = fileName;
+        row.className = 'file-table-row' + (selectedTextFiles.has(fileKey)?' selected' : '');
+        row.dataset.value = fileKey;
+        row.dataset.folder = folderName;
+        row.dataset.name = fileName;
         row.dataset.index = index;
 
         // 复选框列
@@ -2113,18 +2146,28 @@ function renderTextFileList(){
         const checkbox = document.createElement('input');
         checkbox.type = 'checkbox';
         checkbox.className = 'row-checkbox';
-        checkbox.checked = selectedTextFiles.has(fileName);
+        checkbox.checked = selectedTextFiles.has(fileKey);
         checkbox.onclick = (e) => e.stopPropagation();
         checkbox.onchange = (e) => {
             if(e.target.checked){
-                selectedTextFiles.add(fileName);
+                selectedTextFiles.add(fileKey);
             } else {
-                selectedTextFiles.delete(fileName);
+                selectedTextFiles.delete(fileKey);
             }
             renderTextFileList();
             updateTextFileSelectionState();
         };
         checkCol.appendChild(checkbox);
+
+        // 文件夹列（仅全部视图显示）
+        if(showAllFoldersFiles && folderName){
+            const folderCol = document.createElement('div');
+            folderCol.className = 'file-table-col col-name';
+            folderCol.style.cssText = 'flex:1;font-size:12px;color:#888;min-width:0;';
+            folderCol.textContent = folderName;
+            folderCol.title = folderName;
+            row.appendChild(folderCol);
+        }
 
         // 文件名列
         const nameCol = document.createElement('div');
@@ -2154,7 +2197,7 @@ function renderTextFileList(){
     updateTextFileSortIndicators();
 }
 
-function handleTextFileClick(fileName, event, index){
+function handleTextFileClick(fileKey, event, index){
     const ctrl = event.ctrlKey || event.metaKey;
     const shift = event.shiftKey;
 
@@ -2171,18 +2214,18 @@ function handleTextFileClick(fileName, event, index){
         }
     } else if(ctrl){
         // Ctrl 切换
-        if(selectedTextFiles.has(fileName)){
-            selectedTextFiles.delete(fileName);
+        if(selectedTextFiles.has(fileKey)){
+            selectedTextFiles.delete(fileKey);
         } else {
-            selectedTextFiles.add(fileName);
+            selectedTextFiles.add(fileKey);
         }
     } else {
         // 普通点击
-        if(selectedTextFiles.has(fileName) && selectedTextFiles.size === 1){
+        if(selectedTextFiles.has(fileKey) && selectedTextFiles.size === 1){
             selectedTextFiles.clear();
         } else {
             selectedTextFiles.clear();
-            selectedTextFiles.add(fileName);
+            selectedTextFiles.add(fileKey);
         }
     }
 
@@ -2217,14 +2260,23 @@ function toggleSelectAllTextFiles(){
     const kw = textFileFilterKeyword.toLowerCase();
     const filtered = textFilesMeta.filter(item => !kw || item.name.toLowerCase().includes(kw));
 
-    const allSelected = filtered.every(item => selectedTextFiles.has(item.name));
+    const allSelected = filtered.every(item => {
+        const key = item.folder ? (item.folder+'/'+item.name):item.name;
+        return selectedTextFiles.has(key);
+    });
 
     if(allSelected){
         // 取消全选
-        filtered.forEach(item => selectedTextFiles.delete(item.name));
+        filtered.forEach(item => {
+            const key = item.folder? (item.folder+'/'+item.name):item.name;
+            selectedTextFiles.delete(key);
+        });
     } else {
         // 全选
-        filtered.forEach(item => selectedTextFiles.add(item.name));
+        filtered.forEach(item => {
+            const key = item.folder? (item.folder+'/'+item.name):item.name;
+            selectedTextFiles.add(key);
+        });
     }
 
     renderTextFileList();
@@ -2237,16 +2289,77 @@ async function downloadSelectedTextFiles(){
         return;
     }
 
-    const folder = document.getElementById('folderSelect')?.value;
-    if(!folder){
-        alert('请先选择文件夹');
-        return;
-    }
+    const keys = [...selectedTextFiles];
+    // 检测是否包含跨文件夹文件（key 格式为 "folder/name"）
+    const hasFolderPrefix = keys.some(k => k.includes('/'));
 
-    const fileNames = [...selectedTextFiles];
-    const url = '/api/folders/download-output?folder_name=' + encodeURIComponent(folder) +
-                '&files=' + encodeURIComponent(fileNames.join(','));
-    window.open(url, '_blank');
+    if(hasFolderPrefix){
+        // 全部文件夹模式：使用 multi-download API (POST)
+        const items = keys.map(k => {
+            const idx = k.indexOf('/');
+            return idx > 0 ? {folder: k.substring(0, idx), name: k.substring(idx + 1)} : null;
+        }).filter(Boolean);
+        // 先获取下载 URL，再触发下载
+        try{
+            const resp = await fetch('/api/folders/download-multi', {
+                method:'POST',
+                headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({items})
+            });
+            if(!resp.ok){
+                const err = await resp.json().catch(()=>({}));
+                alert('下载失败：' + (err.detail || resp.statusText));
+                return;
+            }
+            const blob = await resp.blob();
+            const cd = resp.headers.get('content-disposition') || '';
+            let fname = 'selected-files.zip';
+            const m = cd.match(/filename="?(.+?)"?$/);
+            if(m) fname = m[1];
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = fname;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(a.href);
+        }catch(e){
+            alert('下载失败：' + e.message);
+        }
+    } else {
+        // 单文件夹模式
+        const folder = document.getElementById('folderSelect')?.value;
+        if(!folder){
+            alert('请先选择文件夹');
+            return;
+        }
+        try{
+            const resp = await fetch('/api/folders/download-output', {
+                method:'POST',
+                headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({folder_name: folder, files: keys})
+            });
+            if(!resp.ok){
+                const err = await resp.json().catch(()=>({}));
+                alert('下载失败：' + (err.detail || resp.statusText));
+                return;
+            }
+            const blob = await resp.blob();
+            const cd = resp.headers.get('content-disposition') || '';
+            let fname = folder + '.zip';
+            const m = cd.match(/filename="?(.+?)"?$/);
+            if(m) fname = m[1];
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = fname;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(a.href);
+        }catch(e){
+            alert('下载失败：' + e.message);
+        }
+    }
 }
 
 function applyProfileFilter(){
@@ -2755,7 +2868,7 @@ async function api(url, opts={}){
   return await r.json();
 }
 
-async function refreshHistory(preferredValue=''){
+async function refreshHistory(preferredValue='', preferredFolder=''){
   const data = await api('/api/history');
   const hv = document.getElementById('historyVideo');
   const oldValue = hv.value;
@@ -2796,10 +2909,61 @@ async function refreshHistory(preferredValue=''){
         // 刷新时清除选中状态
         selectedFolders.clear();
         lastClickedFolder = null;
-        setHiddenSelectOptions('folderSelect', foldersList, document.getElementById('folderSelect')?.value || '');
+        const activeFolder = preferredFolder && foldersList.includes(preferredFolder)
+            ? preferredFolder
+            : (document.getElementById('folderSelect')?.value || '');
+        setHiddenSelectOptions('folderSelect', foldersList, activeFolder);
+        // 如果有优先文件夹，自动在可见列表中选中它
+        if(preferredFolder && foldersList.includes(preferredFolder)){
+            selectedFolders.add(preferredFolder);
+            lastClickedFolder = foldersList.indexOf(preferredFolder);
+        }
         applyFolderFilter();
-        await refreshTextFiles();
+        await refreshCurrentFileView();
         syncSelectionStates();
+}
+
+// ─── 全部文件夹视图切换 ───
+function toggleAllFilesView(){
+    showAllFoldersFiles = !showAllFoldersFiles;
+    const btn = document.getElementById('toggleAllFilesBtn');
+    const folderCol = document.getElementById('textFileFolderCol');
+    if(btn) btn.textContent = showAllFoldersFiles ? '显示当前文件夹' : '显示全部文件夹';
+    if(folderCol) folderCol.style.display = showAllFoldersFiles ? '' : 'none';
+    refreshCurrentFileView();
+}
+
+async function refreshCurrentFileView(){
+    if(showAllFoldersFiles){
+        await refreshAllTextFiles();
+    } else {
+        await refreshCurrentFileView();
+    }
+}
+
+async function refreshAllTextFiles(){
+    try{
+        const data = await api('/api/folders/all-output-files');
+        allFilesMeta = Array.isArray(data.files)
+            ? data.files.map(item=>({folder:item.folder, name:item.name, mtime:Number(item.mtime || 0), size:Number(item.size || 0)}))
+            : [];
+        // 使用 allFilesMeta 作为显示数据源
+        textFilesMeta = allFilesMeta.map(item=>({folder:item.folder, name:item.name, mtime:item.mtime, size:item.size}));
+        selectedTextFiles.clear();
+        lastClickedTextFile = null;
+        applyTextFileFilter();
+        updateTextFileSelectionState();
+        syncSelectionStates();
+    }catch(e){
+        console.error('全部文件列表获取失败', e);
+        textFilesMeta = [];
+        allFilesMeta = [];
+        selectedTextFiles.clear();
+        lastClickedTextFile = null;
+        applyTextFileFilter();
+        updateTextFileSelectionState();
+        syncSelectionStates();
+    }
 }
 
 async function refreshTextFiles(){
@@ -3119,7 +3283,7 @@ async function stopJob(){
 }
 
 async function startTranslate(){
-  if(!currentJobId) return;
+  if(!currentJobId){ alert('请先完成一次转录任务'); return; }
     const chosenModel = document.getElementById('homeModelSel').value || document.getElementById('modelSel').value;
         const payload = {
                 online_profile: document.getElementById('profileSel').value,
@@ -3165,23 +3329,33 @@ function startPoll(){
             };
 
             if(justDone){
-                // 任务完成 → 最终刷新
+                // 任务完成 → 最终刷新，自动选中当前任务文件夹
                 const preferredWav = (data.current_job && data.current_prefix)
                     ? `workspace/${data.current_job}/${data.current_prefix}.wav`
                     : '';
-                await refreshHistory(preferredWav);
+                await refreshHistory(preferredWav, data.current_job || '');
                 refreshQueueStatus();
-                clearInterval(pollTimer);
-                pollTimer = null;
-                // 自动翻译
+
+                // 自动翻译（优先于自动下载，翻译完成后再触发下载）
                 if(pendingAutoFlags.translate && !data.failed){
                   pendingAutoFlags.translate = false;
-                  try{ await startTranslate(); }catch(e){ console.error('自动翻译失败', e); }
-                }
-                // 自动下载 ZIP
-                if(pendingAutoFlags.download && !data.failed){
-                  pendingAutoFlags.download = false;
-                  try{ await downloadOutputZip(); }catch(e){ console.error('自动下载失败', e); }
+                  clearInterval(pollTimer);
+                  pollTimer = null;
+                  try{
+                    await startTranslate();
+                  }catch(e){
+                    console.error('自动翻译失败', e);
+                    // 翻译失败时仍恢复轮询以便 UI 更新
+                    startPoll();
+                  }
+                } else {
+                  clearInterval(pollTimer);
+                  pollTimer = null;
+                  // 自动下载 ZIP（仅在无自动翻译或翻译已完成时触发）
+                  if(pendingAutoFlags.download && !data.failed){
+                    pendingAutoFlags.download = false;
+                    try{ await downloadOutputZip(); }catch(e){ console.error('自动下载失败', e); }
+                  }
                 }
             }
         }catch(e){ console.error(e); }
@@ -3241,6 +3415,25 @@ function initDragZones() {
     syncSelectionStates();
         updateTaskPanel({});
         initDragZones();
+  // 恢复正在运行的任务或最近完成的任务
+  try{
+    const qs = await api('/api/queue/status');
+    if(qs.running_job){
+      currentJobId = qs.running_job.job_id;
+      startPoll();
+    } else if(qs.all_jobs && qs.all_jobs.length > 0){
+      // 找到最近的已完成但未翻译的任务
+      const recent = qs.all_jobs.find(j => j.done && !j.failed);
+      if(recent){
+        currentJobId = recent.job_id;
+        // 直接填充 UI（不再轮询，因为已完成）
+        document.getElementById('statusText').value = recent.status || '';
+        document.getElementById('plainText').value = recent.plain_text || '';
+        document.getElementById('logText').value = recent.log_text || '';
+        updateTaskPanel(recent);
+      }
+    }
+  }catch(e){ console.error('恢复任务状态失败', e); }
 })();
 </script>
 </body>
@@ -3408,13 +3601,138 @@ def api_folder_output_files(folder_name: str):
     return {"folder_name": folder.name, "files": entries}
 
 
-@app.get("/api/folders/download-output")
-def api_download_output_files(folder_name: str, files: str):
+@app.post("/api/folders/translate")
+def api_folder_translate(payload: dict[str, str]):
+    """对已有文件夹中的 SRT 字幕执行翻译"""
+    global _RUNTIME_THREAD, _RUNTIME_JOB
+    folder_name = str(payload.get("folder_name", "")).strip()
+    if not folder_name:
+        raise HTTPException(status_code=400, detail="folder_name 不能为空")
+
+    job_dir = _resolve_workspace_folder(folder_name)
+    file_prefix = core._resolve_file_prefix(job_dir, None)
+    if not file_prefix:
+        raise HTTPException(status_code=400, detail="未找到原文字幕文件")
+
+    orig_srt = job_dir / f"{file_prefix}.srt"
+    if not orig_srt.exists():
+        raise HTTPException(status_code=400, detail="原文字幕文件不存在")
+
+    profile_name = str(payload.get("online_profile", "")).strip()
+    model_name = str(payload.get("online_model", "")).strip()
+    target_lang = _normalize_lang_code(str(payload.get("target_lang", "zh")).strip())
+
+    app_settings = load_app_settings()
+    if not profile_name:
+        _, active = load_profiles()
+        profile_name = active
+
+    display_name = orig_srt.name
+    job = JobState(
+        job_id=uuid.uuid4().hex,
+        running=False,
+        status="⏳ 翻译准备中",
+        video_path=str(orig_srt),
+        display_name=display_name,
+        auto_translate=True,
+    )
+    with _RUNTIME_LOCK:
+        if _RUNTIME_JOB and _RUNTIME_JOB.running:
+            raise HTTPException(status_code=409, detail="已有任务运行中")
+        job.running = True
+        job.current_job = job_dir.name
+        job.current_prefix = file_prefix
+        _RUNTIME_JOB = job
+        _ALL_JOBS[job.job_id] = job
+
+    _set_job_progress(job, "⏳ 翻译准备中", time.time(), progress_pct=1, eta_seconds=0, step_label="翻译启动")
+
+    job.current_job = job_dir.name
+    job.current_prefix = file_prefix
+
+    _RUNTIME_THREAD = threading.Thread(
+        target=_run_translate_worker, args=(job, profile_name, model_name, target_lang), daemon=True
+    )
+    _RUNTIME_THREAD.start()
+
+    return {"job_id": job.job_id, "folder_name": folder_name}
+
+
+@app.get("/api/folders/all-output-files")
+def api_all_output_files():
+    """返回所有文件夹内的输出文件列表（用于「全部输出文件」视图），同时自动清理旧文本文件"""
+    _cleanup_old_text_files()
+    _OUTPUT_EXTS = {".zip", ".srt", ".txt", ".wav", ".vtt"}
+    all_entries = []
+    for folder in sorted(core.WORKSPACE_DIR.iterdir(), key=lambda x: x.name.lower()):
+        if not folder.is_dir():
+            continue
+        for p in sorted(folder.iterdir(), key=lambda x: x.name.lower()):
+            if not p.is_file() or p.suffix.lower() not in _OUTPUT_EXTS:
+                continue
+            try:
+                mtime = p.stat().st_mtime
+                size = p.stat().st_size
+                size_mb = size / (1024 * 1024)
+            except OSError:
+                mtime = 0.0
+                size_mb = 0
+            all_entries.append({
+                "folder": folder.name,
+                "name": p.name,
+                "mtime": int(mtime),
+                "size": size_mb,
+            })
+    return {"files": all_entries}
+
+
+@app.post("/api/folders/download-multi")
+def api_download_multi_files(payload: dict[str, list]):
+    """下载多个文件（支持跨文件夹），items: [{folder, name}, ...]"""
+    _OUTPUT_EXTS = {".zip", ".srt", ".txt", ".wav", ".vtt"}
+    items = payload.get("items", [])
+    if not items:
+        raise HTTPException(status_code=400, detail="未指定要下载的文件")
+    output_files = []
+    for item in items:
+        folder_name = str(item.get("folder", "")).strip()
+        file_name = str(item.get("name", "")).strip()
+        if not folder_name or not file_name:
+            continue
+        folder = _resolve_workspace_folder(folder_name)
+        file_path = folder / file_name
+        if not file_path.exists() or not file_path.is_file():
+            continue
+        if file_path.suffix.lower() not in _OUTPUT_EXTS:
+            continue
+        try:
+            file_path.resolve().relative_to(folder.resolve())
+        except ValueError:
+            continue
+        output_files.append((folder_name, file_path))
+    if not output_files:
+        raise HTTPException(status_code=404, detail="未找到有效的输出文件")
+    if len(output_files) == 1:
+        return FileResponse(str(output_files[0][1]), filename=output_files[0][1].name)
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for folder_name, fp in output_files:
+            zf.write(fp, arcname=f"{folder_name}/{fp.name}")
+    buffer.seek(0)
+    zip_name = "selected-files.zip"
+    headers = {"Content-Disposition": f'attachment; filename="{zip_name}"'}
+    return StreamingResponse(buffer, media_type="application/zip", headers=headers)
+
+
+@app.post("/api/folders/download-output")
+def api_download_output_files(payload: dict):
     """下载选中文件夹内指定的输出文件（多文件打包为 ZIP，单文件直接下载）"""
+    folder_name = str(payload.get("folder_name", "")).strip()
+    files = payload.get("files", [])
     folder = _resolve_workspace_folder(folder_name)
     _OUTPUT_EXTS = {".zip", ".srt", ".txt", ".wav", ".vtt"}
 
-    file_names = [f.strip() for f in files.split(",") if f.strip()]
+    file_names = [str(f).strip() for f in files if str(f).strip()]
     if not file_names:
         raise HTTPException(status_code=400, detail="未指定要下载的文件")
 
@@ -3739,17 +4057,47 @@ def _download_with_ytdlp(url: str, payload: dict) -> dict:
         t = text.lower()
         return any(k in t for k in login_kw)
 
+    def _detect_wsl_firefox_profile() -> str | None:
+        """在 WSL2 环境下自动查找 Windows Firefox 的 default-release profile 路径"""
+        mnt = Path("/mnt/c")
+        if not mnt.is_dir():
+            return None
+        # 遍历 Windows 用户目录
+        users_dir = mnt / "Users"
+        if not users_dir.is_dir():
+            return None
+        for user in users_dir.iterdir():
+            if user.name.startswith(".") or user.name in ("All Users", "Default", "Default User", "Public", "desktop.ini"):
+                continue
+            ff_dir = user / "AppData" / "Roaming" / "Mozilla" / "Firefox" / "Profiles"
+            if not ff_dir.is_dir():
+                continue
+            # 优先 default-release
+            for prof in sorted(ff_dir.iterdir(), key=lambda p: (".default-release" not in p.name, p.name)):
+                if (prof / "cookies.sqlite").is_file():
+                    return str(prof)
+        return None
+
+    _wsl_ff_profile = _detect_wsl_firefox_profile()
+    _proxy_url = app_settings.get("DOWNLOAD_PROXY", "").strip()
+
+    def _proxy_args() -> list[str]:
+        return ["--proxy", _proxy_url] if _proxy_url else []
+
     def _cookie_args(browser: str | None) -> list[str]:
         # 优先使用上传的 cookies.txt 文件
         cookie_file = project_root / "cookies.txt"
         if cookie_file.exists():
             return ["--cookies", str(cookie_file)]
+        # WSL2 下优先使用 Windows Firefox cookie
+        if _wsl_ff_profile and browser == "firefox":
+            return ["--cookies-from-browser", f"firefox:{_wsl_ff_profile}"]
         return ["--cookies-from-browser", browser] if browser else []
 
     def _get_title(cookie_extra: list[str]) -> str | None:
         """先用 --simulate 拿 title，不产生任何文件。"""
         cmd = [ytdlp_bin, "--no-playlist", "--simulate",
-               "--print", "title"] + cookie_extra + [url]
+               "--print", "title"] + _proxy_args() + cookie_extra + [url]
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         if r.returncode == 0:
             lines = [l for l in r.stdout.strip().splitlines() if l.strip()]
@@ -3758,7 +4106,7 @@ def _download_with_ytdlp(url: str, payload: dict) -> dict:
 
     def _download(dest_dir: Path, cookie_extra: list[str]) -> tuple[int, str, str]:
         output_tmpl = str(dest_dir)
-        cmd = [ytdlp_bin, "--no-playlist", "-f", "bestaudio[ext=m4a]/bestaudio/best"]
+        cmd = [ytdlp_bin, "--no-playlist", "-f", "bestaudio[ext=m4a]/bestaudio/best"] + _proxy_args()
         if not disable_auto_subs:
             cmd.extend([
                 "--write-auto-subs",
@@ -3784,8 +4132,11 @@ def _download_with_ytdlp(url: str, payload: dict) -> dict:
         core.TEMP_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
         return core.TEMP_VIDEO_DIR / f"{safe}.%(id)s.%(ext)s"
 
-    # 尝试顺序：各浏览器 cookie → 无 cookie
-    browser_attempts: list[str | None] = ["chrome", "chromium", "firefox", "edge", None]
+    # 尝试顺序：WSL2 下 Firefox 优先；否则按原顺序
+    if _wsl_ff_profile:
+        browser_attempts: list[str | None] = ["firefox", "chrome", "chromium", "edge", None]
+    else:
+        browser_attempts: list[str | None] = ["chrome", "chromium", "firefox", "edge", None]
 
     for browser in browser_attempts:
         extra = _cookie_args(browser)
