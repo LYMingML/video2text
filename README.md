@@ -1,14 +1,16 @@
 # video2text
 
-Video/audio to subtitle tool with dual ASR backends (FunASR Paraformer & faster-whisper), URL download support, and AI-powered subtitle translation.
+Video/audio to subtitle tool with triple ASR backends (VibeVoice, FunASR, faster-whisper), pluggable architecture, and AI-powered subtitle translation.
 
 **[中文文档](docs/README_zh.md)**
 
-**Version**: v0.3.0
+**Version**: v0.4.0
 
 ## Features
 
-- **Dual ASR Backends**: FunASR (Paraformer, best for Chinese) / faster-whisper (multilingual)
+- **Triple ASR Backends**: VibeVoice ASR (7B/9B, speaker diarization, default) / FunASR (Paraformer, best for Chinese) / faster-whisper (multilingual)
+- **Pluggable Architecture**: Abstract base classes + registry pattern, easy to add new ASR/translate backends
+- **Tesla P4 / Pascal GPU Support**: PyTorch 2.3.1 compatibility patches for 4-bit/8-bit quantized VibeVoice models (~6GB VRAM)
 - **URL Download**: yt-dlp for YouTube, Bilibili, etc.; XHS-Downloader for watermark-free Xiaohongshu videos
 - **Auto Subtitle Import**: Platform-provided subtitles are imported first, skipping ASR when available
 - **AI Translation**: OpenAI-compatible API for subtitle translation (SiliconFlow, DeepSeek, etc.)
@@ -16,7 +18,8 @@ Video/audio to subtitle tool with dual ASR backends (FunASR Paraformer & faster-
 - **WSL2 Auto-Detection**: Automatically reads Windows Firefox cookies on WSL2 for authenticated downloads
 - **Proxy Support**: Configurable HTTP proxy for yt-dlp (YouTube, etc.)
 - **External API**: Unified `/api/external/process` endpoint for third-party integration
-- **Smart Dedup**: Identical uploads are cached by content fingerprint,- **Batch Translate**: Parallel subtitle translation with configurable thread count
+- **Smart Dedup**: Identical uploads are cached by content fingerprint
+- **Batch Translate**: Parallel subtitle translation with configurable thread count
 
 ## Quick Start
 
@@ -67,9 +70,11 @@ Key settings in `.env`:
 | Setting | Description | Default |
 |--------|-------------|---------|
 | `APP_PORT` | Service port | `7881` |
-| `DEFAULT_BACKEND` | ASR backend | `FunASR（Paraformer）` |
+| `DEFAULT_BACKEND` | ASR backend | `VibeVoice ASR（长音频+说话人分离）` |
 | `DEFAULT_FUNASR_MODEL` | FunASR model | `paraformer-zh` |
 | `DEFAULT_WHISPER_MODEL` | Whisper model | `medium` |
+| `VIBEVOICE_MODEL` | VibeVoice model | `VibeVoice-ASR-7B` |
+| `VIBEVOICE_QUANT_BITS` | VibeVoice quantization (4/8) | `4` |
 | `AUTO_SUBTITLE_LANG` | Subtitle priority language | `zh` |
 | `DOWNLOAD_PROXY` | yt-dlp HTTP proxy | (empty) |
 | `FFMPEG_THREADS` | FFmpeg thread count | `4` |
@@ -114,15 +119,23 @@ Input types: `base64`, `url`, `history`
 ```
 video2text/
 ├── fastapi_app.py          # FastAPI app + embedded HTML/JS frontend
-├── main.py                 # Gradio UI (alternative frontend)
+├── main.py                 # Core transcription orchestration
 ├── main.sh                 # Launcher script
-├── backend/
-│   ├── funasr_backend.py   # FunASR Paraformer backend
-│   └── whisper_backend.py  # faster-whisper backend
+├── backends/               # Pluggable ASR/translate backends
+│   ├── base_asr.py         # ASR abstract base class
+│   ├── base_translate.py   # Translate abstract base class
+│   ├── vibevoice_asr.py    # VibeVoice ASR (default, speaker diarization)
+│   ├── funasr_asr.py       # FunASR Paraformer backend
+│   ├── whisper_asr.py      # faster-whisper backend
+│   └── siliconflow_translate.py  # OpenAI-compatible translation
+├── core/                   # Extracted business logic
+│   ├── config.py           # Global config & constants
+│   ├── workspace.py        # Workspace & file management
+│   ├── transcribe_logic.py # Transcription orchestration
+│   └── pipeline.py         # Pipeline engine
 ├── utils/
 │   ├── audio.py            # FFmpeg audio extraction
-│   ├── core.py             # Core orchestration logic
-│   ├── subtitle.py          # SRT/VTT/TXT subtitle I/O
+│   ├── subtitle.py         # SRT/VTT/TXT subtitle I/O
 │   ├── translate.py         # Parallel subtitle translation
 │   ├── online_models.py    # Translation model profile management
 │   └── xhs_downloader.py   # Xiaohongshu watermark-free download
@@ -152,6 +165,16 @@ echo "PREFER_INTEL_GPU=1" >> .env
 ```
 
 ## Changelog
+
+### v0.4.0
+- feat: VibeVoice ASR backend (7B/9B model, speaker diarization, 4-bit/8-bit quantization)
+- feat: Pluggable backend architecture (`backends/` with abstract base classes + registry)
+- feat: `core/` module extracted from `main.py` (config, workspace, transcribe logic)
+- feat: VibeVoice quantization works on Tesla P4 (8GB VRAM, Pascal sm_61)
+- feat: PyTorch 2.3.1 compatibility patches (version spoof, is_autocast_enabled, set_submodule backport)
+- feat: Frontend model selector with `::N` quantization suffix (e.g., `VibeVoice-ASR-7B::4`)
+- refactor: Remove Gradio UI, FastAPI is the sole frontend
+- refactor: `backend/` → `backends/` with proper ASR/translate abstraction
 
 ### v0.3.0
 - feat: WSL2 auto-detection of Windows Firefox cookies for authenticated downloads

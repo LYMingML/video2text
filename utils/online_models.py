@@ -11,7 +11,7 @@ ENV_PATH = PROJECT_ROOT / ".env"
 APP_SETTINGS_DEFAULTS = {
     "APP_PORT": "7881",
     "BROWSER_DEBUG_PORT": "9222",
-    "DEFAULT_BACKEND": "FunASR（Paraformer）",
+    "DEFAULT_BACKEND": "VibeVoice ASR（长音频+说话人分离）",
     "DEFAULT_FUNASR_MODEL": "paraformer-zh ⭐ 普通话精度推荐",
     "DEFAULT_WHISPER_MODEL": "medium",
     "AUTO_SUBTITLE_LANG": "zh",

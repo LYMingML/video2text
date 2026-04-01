@@ -1,14 +1,16 @@
 # video2text
 
-视频/音频转字幕工具，支持 FunASR Paraformer 和 faster-whisper 双 ASR 后端、URL 下载及 AI 字幕翻译。
+视频/音频转字幕工具，支持 VibeVoice ASR、FunASR Paraformer、faster-whisper 三大 ASR 后端、插件化架构、URL 下载及 AI 字幕翻译。
 
 **[English Documentation](../README.md)**
 
-**版本**: v0.3.0
+**版本**: v0.4.0
 
 ## 功能特性
 
-- **双 ASR 后端**：FunASR（Paraformer，中文最佳）/ faster-whisper（多语言）
+- **三大 ASR 后端**：VibeVoice ASR（7B/9B，说话人分离，默认）/ FunASR（Paraformer，中文最佳）/ faster-whisper（多语言）
+- **插件化架构**：抽象基类 + 注册表模式，轻松添加新 ASR/翻译后端
+- **Tesla P4 / Pascal GPU 支持**：PyTorch 2.3.1 兼容补丁，支持 4-bit/8-bit 量化 VibeVoice 模型（~6GB 显存）
 - **URL 下载**：yt-dlp 支持 YouTube、Bilibili 等；XHS-Downloader 支持小红书无水印视频
 - **自动字幕导入**：优先使用平台提供的字幕，跳过语音识别
 - **AI 翻译**：通过 OpenAI 兼容 API 翻译字幕（SiliconFlow、DeepSeek 等）
@@ -68,9 +70,11 @@ sudo systemctl status video2text
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
 | `APP_PORT` | 服务端口 | `7881` |
-| `DEFAULT_BACKEND` | ASR 后端 | `FunASR（Paraformer）` |
+| `DEFAULT_BACKEND` | ASR 后端 | `VibeVoice ASR（长音频+说话人分离）` |
 | `DEFAULT_FUNASR_MODEL` | FunASR 模型 | `paraformer-zh` |
-| `DEFAULT_WHISPER_MODEL` | Whisper 模型 | `medium` |
+| `DEFAULT_WHISPER_MODEL` | Whisper 模型 | `large-v3` |
+| `VIBEVOICE_MODEL` | VibeVoice 模型 | `VibeVoice-ASR-7B` |
+| `VIBEVOICE_QUANT_BITS` | VibeVoice 量化位数 (4/8) | `4` |
 | `AUTO_SUBTITLE_LANG` | 字幕优先语言 | `zh` |
 | `DOWNLOAD_PROXY` | yt-dlp HTTP 代理 | （空） |
 | `FFMPEG_THREADS` | FFmpeg 线程数 | `4` |
@@ -114,16 +118,25 @@ curl -X POST "http://127.0.0.1:7881/api/external/process" \
 
 ```
 video2text/
-├── fastapi_app.py          # FastAPI 应用 + 内嵌 HTML/JS 前端
-├── main.py                 # Gradio 界面（备选前端）
+├── fastapi_app.py          # FastAPI 应用 + 内嵌 HTML/JS 前端（唯一前端）
+├── main.py                 # 核心转录编排逻辑
 ├── main.sh                 # 启动脚本
-├── backend/
-│   ├── funasr_backend.py   # FunASR Paraformer 后端
-│   └── whisper_backend.py  # faster-whisper 后端
+├── backends/               # 插件化 ASR/翻译后端
+│   ├── __init__.py         # 注册表 + 工厂函数
+│   ├── base_asr.py         # ASR 抽象基类
+│   ├── base_translate.py   # 翻译抽象基类
+│   ├── vibevoice_asr.py    # VibeVoice ASR 后端（默认，说话人分离）
+│   ├── funasr_asr.py       # FunASR Paraformer 后端
+│   ├── whisper_asr.py      # faster-whisper 后端
+│   └── siliconflow_translate.py  # OpenAI 兼容翻译后端
+├── core/                   # 从 main.py 提取的业务逻辑
+│   ├── config.py           # 全局配置与常量
+│   ├── workspace.py        # 工作目录管理
+│   ├── transcribe_logic.py # 转录编排
+│   └── pipeline.py         # 四阶段流水线引擎
 ├── utils/
-│   ├── audio.py            # FFmpeg 音频提取
-│   ├── core.py             # 核心编排逻辑
-│   ├── subtitle.py          # SRT/VTT/TXT 字幕 I/O
+│   ├── audio.py            # FFmpeg 音频提取与分片
+│   ├── subtitle.py         # SRT/VTT/TXT 字幕读写
 │   ├── translate.py         # 并行字幕翻译
 │   ├── online_models.py    # 翻译模型配置组管理
 │   └── xhs_downloader.py   # 小红书无水印下载
@@ -137,7 +150,7 @@ video2text/
 
 ### NVIDIA GPU
 
-- 架构：Pascal+（计算能力 >= 6.0）
+- 架构：Pascal+（计算能力 >= 6.0），Tesla P4/P40 等 Pascal 卡通过量化补丁支持 VibeVoice
 - 需要：NVIDIA 驱动 + NVIDIA Container Toolkit（Docker）
 
 ```bash
@@ -153,6 +166,15 @@ echo "PREFER_INTEL_GPU=1" >> .env
 ```
 
 ## 更新日志
+
+### v0.4.0
+- feat: VibeVoice ASR 后端（7B/9B 模型，说话人分离，4-bit/8-bit 量化，默认后端）
+- feat: 插件化后端架构（`backends/` 目录，抽象基类 + 注册表模式）
+- feat: `core/` 模块从 main.py 提取（config、workspace、transcribe_logic、pipeline）
+- feat: Tesla P4 / Pascal GPU 兼容性补丁（PyTorch 版本欺骗、is_autocast_enabled 签名修复、nn.Module.set_submodule 回移植入）
+- feat: 前端模型选择器支持 `::N` 量化后缀（如 `VibeVoice-ASR-7B::4`）
+- refactor: 移除 Gradio UI，FastAPI 为唯一前端
+- refactor: `backend/` → `backends/`，完整 ASR/翻译抽象
 
 ### v0.3.0
 - feat: WSL2 自动检测 Windows Firefox Cookie，实现认证下载

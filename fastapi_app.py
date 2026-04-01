@@ -1,6 +1,55 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+# ---------------------------------------------------------------------------
+# Tesla P4 / Pascal GPU (sm_61) 兼容性补丁
+# PyTorch >= 2.4 不再支持 sm_61，需锁定 2.3.x。
+# 但 transformers >= 5.3 要求 PyTorch >= 2.4，否则禁用 torch 集成。
+# 此补丁让 transformers 检测到兼容版本，绕过此限制。
+# ---------------------------------------------------------------------------
+import importlib.metadata as _ilm_meta
+_ilm_version_orig = _ilm_meta.version
+def _patched_version(name):
+    if name == 'torch':
+        import torch as _t
+        v = _t.__version__
+        if v.startswith('2.3'):
+            return '2.4.0+cu121'
+    return _ilm_version_orig(name)
+_ilm_meta.version = _patched_version
+
+# PyTorch 2.3.x 的 is_autocast_enabled() 不接受参数，
+# 但 transformers >= 5.3 调用 is_autocast_enabled(device_type)。
+# 此补丁让旧版 PyTorch 兼容新版调用方式。
+import torch as _torch
+_is_autocast_orig = _torch.is_autocast_enabled
+def _patched_is_autocast_enabled(device_type=None):
+    if device_type is not None:
+        return _is_autocast_orig()
+    return _is_autocast_orig()
+_torch.is_autocast_enabled = _patched_is_autocast_enabled
+
+# PyTorch 2.3.x 的 nn.Module 没有 set_submodule 方法（2.5+ 才有），
+# 但 transformers 的 bitsandbytes 量化流程需要此方法。
+# 此补丁为 nn.Module 添加 set_submodule，使 4-bit/8-bit 量化兼容旧版 PyTorch。
+import torch.nn as _nn
+if not hasattr(_nn.Module, 'set_submodule'):
+    def _set_submodule_backport(self, target, module):
+        atoms = target.split('.')
+        mod = self
+        for i, atom in enumerate(atoms[:-1]):
+            if not hasattr(mod, atom):
+                raise AttributeError(f"Module has no attribute '{atom}'")
+            mod = getattr(mod, atom)
+            if not isinstance(mod, _nn.Module):
+                raise AttributeError(f"Intermediate attribute '{'.'.join(atoms[:i+1])}' is not a Module")
+        last_atom = atoms[-1]
+        if not hasattr(mod, last_atom):
+            raise AttributeError(f"Module has no attribute '{last_atom}'")
+        mod._modules[last_atom] = module
+    _nn.Module.set_submodule = _set_submodule_backport
+
+
 import base64
 import io
 import json
@@ -20,7 +69,39 @@ from typing import Any
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 
+from core.config import (
+    STOP_EVENT,
+    TEMP_VIDEO_DIR,
+    TEMP_VIDEO_KEEP_COUNT,
+    WORKSPACE_DIR,
+    _guess_source_lang,
+    _has_nvidia_gpu,
+    _is_supported_media_path,
+    _looks_non_chinese_text,
+    _parse_lang_code,
+    get_transcribing_video,
+    set_transcribing_video,
+)
+from core.workspace import (
+    _cleanup_job_source_media,
+    _delete_job_folder,
+    _find_duplicate_file,
+    _list_job_folders_meta,
+    _list_uploaded_videos,
+    _load_task_meta,
+    _parse_srt_segments,
+    _prune_temp_video_dir,
+    _resolve_file_prefix,
+    _resolve_job_dir_for_input,
+    _resolve_current_job,
+    _save_task_meta,
+    _stage_source_media_to_temp_video,
+    _unique_file_path,
+)
+# main.py 中仍有部分未迁移函数（_do_transcribe_stream, _finalize_plain_text_outputs 等），
+# 保留 import 以兼容；长期目标是将这些也迁移到 core/ 后移除此行。
 import main as core
+
 from utils.online_models import delete_profile, load_app_settings, load_profiles, save_app_settings, save_profiles, upsert_profile
 from utils.subtitle import collect_plain_text, normalize_segments_timeline, save_plain, save_srt, segments_to_plain
 from utils.translate import is_ollama_base_url, list_available_models, translate_segments
@@ -1279,6 +1360,7 @@ button:hover{transform:translateY(-1px);background:#ecfaf4}
                         <div class="drag-item field" draggable="true">
                             <label for="homeBackendSel">识别后端</label>
                             <select id="homeBackendSel" onchange="onHomeBackendChange()">
+                                <option>VibeVoice ASR（长音频+说话人分离）</option>
                                 <option>FunASR（Paraformer）</option>
                                 <option>faster-whisper（多语言）</option>
                             </select>
@@ -1456,6 +1538,7 @@ button:hover{transform:translateY(-1px);background:#ecfaf4}
                     <div class="field compact">
                         <label for="backendSel">识别后端</label>
                         <select id="backendSel">
+                            <option>VibeVoice ASR（长音频+说话人分离）</option>
                             <option>FunASR（Paraformer）</option>
                             <option>faster-whisper（多语言）</option>
                         </select>
@@ -1623,6 +1706,12 @@ const HOME_WHISPER_MODELS = [
     {value:'small', name:'small', feature:'均衡'},
     {value:'medium', name:'medium', feature:'高质量推荐'},
     {value:'large-v3', name:'large-v3', feature:'精度优先'},
+];
+const HOME_VIBEVOICE_MODELS = [
+    {value:'bezzam/VibeVoice-ASR-7B::4', name:'VibeVoice-ASR-7B · 4-bit', feature:'~5GB显存，8GB显卡推荐'},
+    {value:'bezzam/VibeVoice-ASR-7B::8', name:'VibeVoice-ASR-7B · 8-bit', feature:'~8GB显存，较高质量'},
+    {value:'microsoft/VibeVoice-ASR-HF::4', name:'VibeVoice-ASR-9B · 4-bit', feature:'~9GB显存，高精度+说话人分离'},
+    {value:'microsoft/VibeVoice-ASR-HF::8', name:'VibeVoice-ASR-9B · 8-bit', feature:'~16GB显存，最高质量'},
 ];
 
 function toHms(seconds){
@@ -2584,7 +2673,9 @@ function bindSelectionListeners(){
 
 function getBackendModelCatalog(){
     const backend = document.getElementById('homeBackendSel')?.value || APP_DEFAULTS.backend;
-    return backend === 'faster-whisper（多语言）' ? HOME_WHISPER_MODELS : HOME_FUNASR_MODELS;
+    if(backend === 'faster-whisper（多语言）') return HOME_WHISPER_MODELS;
+    if(backend.startsWith('VibeVoice')) return HOME_VIBEVOICE_MODELS;
+    return HOME_FUNASR_MODELS;
 }
 
 function renderBackendModelText(item){
@@ -2937,7 +3028,7 @@ async function refreshCurrentFileView(){
     if(showAllFoldersFiles){
         await refreshAllTextFiles();
     } else {
-        await refreshCurrentFileView();
+        await refreshTextFiles();
     }
 }
 
@@ -4395,6 +4486,20 @@ def api_transcribe_start(
 @app.get("/api/queue/status")
 def api_queue_status():
     return _get_queue_status()
+
+
+@app.get("/api/backends")
+def api_list_backends():
+    """返回可用的 ASR/翻译后端列表及其元信息。"""
+    from backends import list_asr_backends, list_translate_backends, get_asr_backend_info
+    asr = []
+    for cls_name in list_asr_backends():
+        try:
+            asr.append(get_asr_backend_info(cls_name))
+        except Exception:
+            asr.append({"class_name": cls_name, "error": "加载失败"})
+    translate = list_translate_backends()
+    return {"asr_backends": asr, "translate_backends": translate}
 
 
 @app.get("/api/jobs/{job_id}")

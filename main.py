@@ -25,7 +25,10 @@ import threading
 from pathlib import Path
 from typing import Callable, Iterator
 
-import gradio as gr
+try:
+    import gradio as gr
+except ImportError:
+    gr = None  # type: ignore[assignment]
 
 # 把项目根目录加入 sys.path，确保子模块可导入
 sys.path.insert(0, str(Path(__file__).parent))
@@ -1281,6 +1284,9 @@ def _do_transcribe_stream(
 
         chunk_seconds = 120
         overlap_seconds = 10
+        # VibeVoice 自带切片逻辑（60min + 10min overlap），不需要外部切分
+        if backend.startswith("VibeVoice"):
+            chunk_seconds = 0  # 跳过外部切分
         chunk_dir = job_dir / "chunks"
         if duration > chunk_seconds:
             if log_cb:
@@ -1313,6 +1319,9 @@ def _do_transcribe_stream(
 
         if backend == "FunASR（Paraformer）":
             effective_model = funasr_model.split(" ")[0].strip()
+            effective_device = "cuda:0" if device == "CUDA" else "cpu"
+        elif backend.startswith("VibeVoice"):
+            effective_model = funasr_model
             effective_device = "cuda:0" if device == "CUDA" else "cpu"
         else:
             effective_model = whisper_model
@@ -1383,6 +1392,38 @@ def _do_transcribe_stream(
                     f"⏳ 转写进度：{pct}%｜预计剩余 {_format_eta(eta_s)}"
                 )
                 yield progress_text, all_segments.copy()
+
+        elif backend.startswith("VibeVoice"):
+            # --- VibeVoice ASR 后端（使用 backends 插件架构） ---
+            from backends import get_asr_backend
+            asr = get_asr_backend("VibeVoiceASR")
+
+            effective_model = funasr_model or asr.default_model
+            effective_device = "cuda:0" if device == "CUDA" else "cpu"
+
+            if log_cb:
+                log_cb(f"[MODEL] VibeVoice ASR: {effective_model}")
+                log_cb("[STEP] 正在加载 VibeVoice 模型...")
+            yield "⏳ 正在加载 VibeVoice 模型...", []
+
+            # VibeVoice 自带切片逻辑（60min chunks + 10min overlap），直接对整段音频转录
+            def _vv_progress(ratio: float, msg: str):
+                if log_cb:
+                    log_cb(f"[PROGRESS] {msg}")
+
+            segs = asr.transcribe(
+                audio_path,
+                model_name=effective_model,
+                language=lang_code,
+                device=effective_device,
+                progress_cb=_vv_progress,
+            )
+            all_segments.extend(segs)
+
+            progress_text = _strip_fractional_time(
+                f"⏳ 转写完成：共 {len(all_segments)} 条字幕"
+            )
+            yield progress_text, all_segments.copy()
 
         else:  # faster-whisper
             from backend.whisper_backend import transcribe
@@ -1666,7 +1707,7 @@ def process(
 # Gradio UI 布局
 # ---------------------------------------------------------------------------
 
-def build_ui() -> gr.Blocks:
+def build_ui() -> "gr.Blocks":
     with gr.Blocks(
         title="视频转字幕",
     ) as demo:
