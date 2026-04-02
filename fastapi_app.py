@@ -50,7 +50,9 @@ if not hasattr(_nn.Module, 'set_submodule'):
     _nn.Module.set_submodule = _set_submodule_backport
 
 
+import asyncio
 import base64
+import queue as _queue_mod
 import io
 import json
 import logging
@@ -152,6 +154,10 @@ _RUNTIME_THREAD: threading.Thread | None = None
 # 任务队列系统
 _TRANSCRIBE_QUEUE: list[str] = []
 _ALL_JOBS: dict[str, JobState] = {}
+
+# SSE 推送系统
+_job_subscribers: dict[str, list[queue.SimpleQueue]] = {}
+_last_pushed_pct: dict[str, int] = {}  # job_id → 上次推送的 progress_pct
 
 SUBTITLE_PRIORITY_PRESETS: dict[str, str] = {
     "zh": "zh-Hans,zh-CN,zh,zh.*,yue,zh-HK,en,en.*",
@@ -339,6 +345,8 @@ def _json_job(job: JobState) -> dict[str, Any]:
         "model_info": model_info,
         "language": tp.get("language", ""),
         "device": tp.get("device", ""),
+        "auto_translate": job.auto_translate,
+        "auto_download": job.auto_download,
     }
 
 
@@ -482,10 +490,58 @@ def _set_job_progress(
     job.eta_seconds = eta
     job.step_label = step
     job.updated_at = time.time()
+    _notify_sse(job)
+
+
+# ---------------------------------------------------------------------------
+# SSE 推送
+# ---------------------------------------------------------------------------
+
+def _notify_sse(job: JobState):
+    """通知所有订阅该 job 的 SSE 连接。节流：进度变化 < 1% 且无关键状态变化时跳过。"""
+    subscribers = _job_subscribers.get(job.job_id)
+    if not subscribers:
+        return
+
+    last_pct = _last_pushed_pct.get(job.job_id, -1)
+    cur_pct = int(job.progress_pct)
+    progress_changed = abs(cur_pct - last_pct) >= 1
+    state_changed = job.done or job.failed or not job.running
+
+    if not progress_changed and not state_changed:
+        return
+
+    _last_pushed_pct[job.job_id] = cur_pct
+    data = _json_job(job)
+
+    for q in subscribers:
+        try:
+            q.put_nowait(data)
+        except Exception:
+            pass
+
+    if job.done:
+        _last_pushed_pct.pop(job.job_id, None)
+
+
+def _sse_subscribe(job_id: str) -> _queue_mod.Queue:
+    """创建线程安全的 SSE 订阅队列。"""
+    q: _queue_mod.Queue = _queue_mod.Queue(maxsize=64)
+    _job_subscribers.setdefault(job_id, []).append(q)
+    return q
+
+
+def _sse_unsubscribe(job_id: str, q: _queue_mod.Queue):
+    """取消 SSE 订阅。"""
+    subs = _job_subscribers.get(job_id)
+    if subs and q in subs:
+        subs.remove(q)
+    if not subs:
+        _job_subscribers.pop(job_id, None)
+        _last_pushed_pct.pop(job_id, None)
 
 
 def _cleanup_old_text_files():
-    """自动清理超过1天的非zip文本文件（srt/txt/vtt/wav）"""
     _KEEP_EXTS = {".zip"}
     _TEXT_EXTS = {".srt", ".txt", ".vtt", ".wav"}
     cutoff = time.time() - 86400  # 1 day
@@ -1330,6 +1386,10 @@ button:hover{transform:translateY(-1px);background:#ecfaf4}
                                 <input type="checkbox" id="autoDownload" />
                                 <span>自动下载</span>
                             </label>
+                            <label class="inline-toggle" title="自动保存到浏览器默认下载路径（无需弹窗确认）">
+                                <input type="checkbox" id="directSave" />
+                                <span>直接保存</span>
+                            </label>
                             <span class="action-spacer"></span>
                         </div>
                     </div>
@@ -1664,6 +1724,7 @@ const APP_DEFAULTS = {
 
 let currentJobId = "";
 let pollTimer = null;
+let eventSource = null;
 let _prevJobState = { current_job:'', step_label:'', done:false };
 let pendingAutoFlags = { translate: false, download: false };
 let foldersList = [];
@@ -3247,12 +3308,27 @@ async function downloadOutputZip(){
         return;
     }
     const url = '/api/jobs/'+currentJobId+'/download-file?file_name='+encodeURIComponent(zipName);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = zipName;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    if(document.getElementById('directSave')?.checked){
+        // fetch+blob 方式：可靠地保存到浏览器默认下载路径（不受用户手势限制）
+        const resp = await fetch(url);
+        if(!resp.ok) throw new Error('下载失败: '+resp.status);
+        const blob = await resp.blob();
+        const blobUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = zipName;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(blobUrl);
+    }else{
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = zipName;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+    }
 }
 
 async function downloadVideoUrl(){
@@ -3387,70 +3463,101 @@ async function startTranslate(){
 }
 
 function startPoll(){
-    if(pollTimer) clearInterval(pollTimer);
+    _stopPoll();
     _prevJobState = { current_job:'', step_label:'', done:false };
+
+    // 优先尝试 SSE
+    try{
+        eventSource = new EventSource('/api/jobs/'+currentJobId+'/stream');
+        eventSource.onmessage = function(e){
+            try{
+                const data = JSON.parse(e.data);
+                handleJobUpdate(data);
+            }catch(err){ console.error('SSE parse error', err); }
+        };
+        eventSource.onerror = function(){
+            // SSE 失败 → 关闭并降级到轮询
+            console.warn('SSE 连接失败，降级到轮询');
+            if(eventSource){ eventSource.close(); eventSource = null; }
+            startFallbackPoll();
+        };
+    }catch(e){
+        console.warn('EventSource 不可用，降级到轮询', e);
+        startFallbackPoll();
+    }
+}
+
+function startFallbackPoll(){
+    if(pollTimer) clearInterval(pollTimer);
     pollTimer = setInterval(async ()=>{
         if(!currentJobId) return;
         try{
             const data = await api('/api/jobs/'+currentJobId);
-            document.getElementById('statusText').value = data.status || '';
-            document.getElementById('plainText').value = data.plain_text || '';
-            document.getElementById('logText').value = data.log_text || '';
-            updateTaskPanel(data);
-
-            // 事件驱动：仅在状态变化时刷新 UI
-            const jobChanged = data.current_job && data.current_job !== _prevJobState.current_job;
-            const stepChanged = data.step_label && data.step_label !== _prevJobState.step_label;
-            const justDone = data.done && !data.running && !_prevJobState.done;
-
-            if(jobChanged && data.current_job && data.current_prefix){
-                // 任务目录确定（音频即将提取）→ 刷新历史记录，更新音频路径
-                const expectedWav = `workspace/${data.current_job}/${data.current_prefix}.wav`;
-                refreshHistory(expectedWav);
-            }
-            if(stepChanged){
-                // 步骤变化（提取音频→转录→翻译）→ 刷新队列
-                refreshQueueStatus();
-            }
-
-            _prevJobState = {
-                current_job: data.current_job || '',
-                step_label: data.step_label || '',
-                done: !!data.done,
-            };
-
-            if(justDone){
-                // 任务完成 → 最终刷新，自动选中当前任务文件夹
-                const preferredWav = (data.current_job && data.current_prefix)
-                    ? `workspace/${data.current_job}/${data.current_prefix}.wav`
-                    : '';
-                await refreshHistory(preferredWav, data.current_job || '');
-                refreshQueueStatus();
-
-                // 自动翻译（优先于自动下载，翻译完成后再触发下载）
-                if(pendingAutoFlags.translate && !data.failed){
-                  pendingAutoFlags.translate = false;
-                  clearInterval(pollTimer);
-                  pollTimer = null;
-                  try{
-                    await startTranslate();
-                  }catch(e){
-                    console.error('自动翻译失败', e);
-                    // 翻译失败时仍恢复轮询以便 UI 更新
-                    startPoll();
-                  }
-                } else {
-                  clearInterval(pollTimer);
-                  pollTimer = null;
-                  // 自动下载 ZIP（仅在无自动翻译或翻译已完成时触发）
-                  if(pendingAutoFlags.download && !data.failed){
-                    pendingAutoFlags.download = false;
-                    try{ await downloadOutputZip(); }catch(e){ console.error('自动下载失败', e); }
-                  }
-                }
-            }
+            handleJobUpdate(data);
         }catch(e){ console.error(e); }
     }, 1000);
+}
+
+function _stopPoll(){
+    if(eventSource){ eventSource.close(); eventSource = null; }
+    if(pollTimer){ clearInterval(pollTimer); pollTimer = null; }
+}
+
+async function handleJobUpdate(data){
+    document.getElementById('statusText').value = data.status || '';
+    document.getElementById('plainText').value = data.plain_text || '';
+    document.getElementById('logText').value = data.log_text || '';
+    updateTaskPanel(data);
+
+    const jobChanged = data.current_job && data.current_job !== _prevJobState.current_job;
+    const stepChanged = data.step_label && data.step_label !== _prevJobState.step_label;
+    const justDone = data.done && !data.running && !_prevJobState.done;
+
+    if(jobChanged && data.current_job && data.current_prefix){
+        const expectedWav = `workspace/${data.current_job}/${data.current_prefix}.wav`;
+        refreshHistory(expectedWav);
+    }
+    if(stepChanged){
+        refreshQueueStatus();
+    }
+
+    _prevJobState = {
+        current_job: data.current_job || '',
+        step_label: data.step_label || '',
+        done: !!data.done,
+    };
+
+    if(justDone){
+        const preferredWav = (data.current_job && data.current_prefix)
+            ? `workspace/${data.current_job}/${data.current_prefix}.wav`
+            : '';
+        await refreshHistory(preferredWav, data.current_job || '');
+        refreshQueueStatus();
+
+        // 兜底：优先用客户端 pendingAutoFlags，若丢失则用服务端标志
+        if(!pendingAutoFlags.translate && data.auto_translate){
+          pendingAutoFlags.translate = true;
+        }
+        if(!pendingAutoFlags.download && data.auto_download){
+          pendingAutoFlags.download = true;
+        }
+        if(pendingAutoFlags.translate && !data.failed){
+          pendingAutoFlags.translate = false;
+          _stopPoll();
+          try{
+            await startTranslate();
+          }catch(e){
+            console.error('自动翻译失败', e);
+            startPoll();
+          }
+        } else {
+          _stopPoll();
+          if(pendingAutoFlags.download && !data.failed){
+            pendingAutoFlags.download = false;
+            try{ await downloadOutputZip(); }catch(e){ console.error('自动下载失败', e); }
+          }
+        }
+    }
 }
 
 function initDragZones() {
@@ -3511,6 +3618,9 @@ function initDragZones() {
     const qs = await api('/api/queue/status');
     if(qs.running_job){
       currentJobId = qs.running_job.job_id;
+      // 恢复自动翻译/自动下载标志（防止页面刷新后丢失）
+      pendingAutoFlags.translate = !!qs.running_job.auto_translate;
+      pendingAutoFlags.download = !!qs.running_job.auto_download;
       startPoll();
     } else if(qs.all_jobs && qs.all_jobs.length > 0){
       // 找到最近的已完成但未翻译的任务
@@ -4517,6 +4627,34 @@ def api_list_backends():
 def api_job_status(job_id: str):
     job = _get_job(job_id)
     return _json_job(job)
+
+
+@app.get("/api/jobs/{job_id}/stream")
+async def api_job_stream(job_id: str):
+    """SSE 端点：任务状态变更时推送，进度 1% 门槛节流。"""
+    job = _get_job(job_id)
+    q = _sse_subscribe(job_id)
+
+    async def _event_stream():
+        try:
+            # 先推送一次当前完整状态
+            yield f"data: {json.dumps(_json_job(job), ensure_ascii=False)}\n\n"
+            while True:
+                try:
+                    data = await asyncio.wait_for(
+                        asyncio.to_thread(q.get, True, 30),
+                        timeout=35,
+                    )
+                except (_queue_mod.Empty, asyncio.TimeoutError):
+                    yield ": heartbeat\n\n"
+                    continue
+                yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+                if data.get("done"):
+                    break
+        finally:
+            _sse_unsubscribe(job_id, q)
+
+    return StreamingResponse(_event_stream(), media_type="text/event-stream")
 
 
 @app.post("/api/jobs/{job_id}/stop")
