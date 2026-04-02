@@ -4,7 +4,7 @@ Video/audio to subtitle tool with triple ASR backends (VibeVoice, FunASR, faster
 
 **[中文文档](docs/README_zh.md)**
 
-**Version**: v0.4.1
+**Version**: v0.4.2
 
 ## Features
 
@@ -165,6 +165,11 @@ echo "PREFER_INTEL_GPU=1" >> .env
 ```
 
 ## Changelog
+
+### v0.4.2
+- fix: auto-translate/auto-download flags lost after page refresh — restore from server-side `auto_translate`/`auto_download` fields
+- feat: SSE replaces 1s polling — event-driven UI updates with 1% progress threshold, auto-fallback to polling on failure
+- feat: "直接保存" checkbox — fetch+blob download to browser default path without dialog
 
 ### v0.4.1
 - fix: yt-dlp compatibility — add `--remote-components ejs:github` and auto-detect JS runtime (deno/node/bun)

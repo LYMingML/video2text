@@ -4,7 +4,7 @@
 
 **[English Documentation](../README.md)**
 
-**版本**: v0.4.1
+**版本**: v0.4.2
 
 ## 功能特性
 
@@ -166,6 +166,11 @@ echo "PREFER_INTEL_GPU=1" >> .env
 ```
 
 ## 更新日志
+
+### v0.4.2
+- fix: 修复页面刷新后自动翻译/自动下载标志丢失 — 从服务端 `auto_translate`/`auto_download` 字段恢复
+- feat: SSE 替代 1 秒轮询 — 事件驱动 UI 更新，1% 进度门槛节流，失败自动降级轮询
+- feat: 新增"直接保存"勾选项 — fetch+blob 方式下载到浏览器默认路径，无需弹窗确认
 
 ### v0.4.1
 - fix: yt-dlp 兼容性修复 — 添加 `--remote-components ejs:github` 参数，自动检测 JS 运行时（deno/node/bun）
