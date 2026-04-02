@@ -163,16 +163,65 @@ def _normalize_plain_line(text: str) -> str:
     return line
 
 
+def _merge_lines_into_paragraphs(
+    items: list[tuple[float, float, str]],
+    gap_threshold: float = 2.0,
+) -> str:
+    """
+    将逐句文本合并为段落。
+
+    分段规则：
+    - 两条之间时间间隔 > gap_threshold 秒 → 分段
+    - 累积超过一定长度（200字符）且当前句以句末标点结尾 → 分段
+
+    Args:
+        items: [(start, end, text), ...] 或 [(0, 0, text), ...]
+        gap_threshold: 时间间隔阈值（秒）
+
+    Returns:
+        段落文本，段间用空行分隔
+    """
+    if not items:
+        return ""
+
+    _SENTENCE_END = set("。！？!?.")
+
+    paragraphs: list[str] = []
+    cur_parts: list[str] = []
+    prev_end: float | None = None
+
+    for start, end, text in items:
+        # 检测时间间隔
+        if prev_end is not None and start - prev_end > gap_threshold and cur_parts:
+            paragraphs.append("".join(cur_parts))
+            cur_parts = []
+
+        cur_parts.append(text)
+        prev_end = end
+
+        # 长段落分割：累积超过 200 字符且以句末标点结尾
+        cur_text = "".join(cur_parts)
+        if len(cur_text) >= 200 and text and text[-1] in _SENTENCE_END:
+            paragraphs.append(cur_text)
+            cur_parts = []
+            prev_end = end
+
+    if cur_parts:
+        paragraphs.append("".join(cur_parts))
+
+    return "\n\n".join(paragraphs) + "\n"
+
+
 def collect_plain_text(segments: list[tuple]) -> str:
-    """直接串联 ASR 结果文本，不调整时间。"""
-    lines: list[str] = []
-    for _, _, text in segments:
+    """直接串联 ASR 结果文本，按段落合并输出。"""
+    items: list[tuple[float, float, str]] = []
+    for start, end, text in segments:
         line = _normalize_plain_line(text)
         if line:
-            lines.append(line)
-    if not lines:
+            items.append((float(start), float(end), line))
+    if not items:
         return ""
-    return "\n".join(lines) + "\n"
+    return _merge_lines_into_paragraphs(items)
 
 
 def normalize_segments_timeline(
@@ -293,17 +342,19 @@ def segments_to_srt(segments: list[tuple], normalize: bool = True, wrap: bool = 
 
 def segments_to_plain(segments: list[tuple], normalize: bool = True) -> str:
     """
-    将 segments 转为纯文本（去掉时间轴）。
+    将 segments 转为纯文本（去掉时间轴），按段落合并。
 
     Args:
         segments: [(start_s, end_s, text), ...]
 
     Returns:
-        纯文本字符串，每句一行
+        纯文本字符串，段落间空行分隔
     """
     segments = normalize_segments_timeline(segments) if normalize else segments
-    lines = [text for _, _, text in segments]
-    return "\n".join(lines) + "\n"
+    items = [(float(s), float(e), t) for s, e, t in segments if t and _normalize_plain_line(t)]
+    if not items:
+        return ""
+    return _merge_lines_into_paragraphs(items)
 
 
 def _extract_role(text: str) -> str | None:

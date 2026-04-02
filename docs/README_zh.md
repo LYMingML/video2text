@@ -4,7 +4,7 @@
 
 **[English Documentation](../README.md)**
 
-**版本**: v0.4.0
+**版本**: v0.4.1
 
 ## 功能特性
 
@@ -166,6 +166,11 @@ echo "PREFER_INTEL_GPU=1" >> .env
 ```
 
 ## 更新日志
+
+### v0.4.1
+- fix: yt-dlp 兼容性修复 — 添加 `--remote-components ejs:github` 参数，自动检测 JS 运行时（deno/node/bun）
+- fix: 纯文本输出改为按时间间隔分段合并，提升可读性
+- fix: 将 mcp、httpx、faster-whisper、stable-ts 从可选依赖移入核心依赖
 
 ### v0.4.0
 - feat: VibeVoice ASR 后端（7B/9B 模型，说话人分离，4-bit/8-bit 量化，默认后端）

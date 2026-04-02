@@ -4,7 +4,7 @@ Video/audio to subtitle tool with triple ASR backends (VibeVoice, FunASR, faster
 
 **[中文文档](docs/README_zh.md)**
 
-**Version**: v0.4.0
+**Version**: v0.4.1
 
 ## Features
 
@@ -165,6 +165,11 @@ echo "PREFER_INTEL_GPU=1" >> .env
 ```
 
 ## Changelog
+
+### v0.4.1
+- fix: yt-dlp compatibility — add `--remote-components ejs:github` and auto-detect JS runtime (deno/node/bun)
+- fix: plain text output now merges lines into paragraphs by time gap (readability improvement)
+- fix: move mcp, httpx, faster-whisper, stable-ts from optional to core dependencies
 
 ### v0.4.0
 - feat: VibeVoice ASR backend (7B/9B model, speaker diarization, 4-bit/8-bit quantization)

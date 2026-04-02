@@ -4072,6 +4072,14 @@ def _find_ytdlp() -> str:
     return shutil.which("yt-dlp") or "yt-dlp"
 
 
+def _ytdlp_js_runtime_args() -> list[str]:
+    """检测可用的 JS 运行时，返回 yt-dlp 需要的 --js-runtimes 参数。"""
+    for name in ("deno", "node", "bun"):
+        if shutil.which(name):
+            return ["--js-runtimes", name]
+    return []
+
+
 @app.post("/api/download_url")
 def api_download_url(payload: dict):
     """使用 XHS-Downloader（小红书）或 yt-dlp 下载视频或音频。"""
@@ -4185,10 +4193,12 @@ def _download_with_ytdlp(url: str, payload: dict) -> dict:
             return ["--cookies-from-browser", f"firefox:{_wsl_ff_profile}"]
         return ["--cookies-from-browser", browser] if browser else []
 
+    _js_args = _ytdlp_js_runtime_args()
+
     def _get_title(cookie_extra: list[str]) -> str | None:
         """先用 --simulate 拿 title，不产生任何文件。"""
-        cmd = [ytdlp_bin, "--no-playlist", "--simulate",
-               "--print", "title"] + _proxy_args() + cookie_extra + [url]
+        cmd = [ytdlp_bin, "--no-playlist", "--simulate", "--remote-components", "ejs:github",
+               "--print", "title"] + _js_args + _proxy_args() + cookie_extra + [url]
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         if r.returncode == 0:
             lines = [l for l in r.stdout.strip().splitlines() if l.strip()]
@@ -4197,7 +4207,8 @@ def _download_with_ytdlp(url: str, payload: dict) -> dict:
 
     def _download(dest_dir: Path, cookie_extra: list[str]) -> tuple[int, str, str]:
         output_tmpl = str(dest_dir)
-        cmd = [ytdlp_bin, "--no-playlist", "-f", "bestaudio[ext=m4a]/bestaudio/best"] + _proxy_args()
+        cmd = [ytdlp_bin, "--no-playlist", "--remote-components", "ejs:github",
+               "-f", "bestaudio[ext=m4a]/bestaudio/best"] + _js_args + _proxy_args()
         if not disable_auto_subs:
             cmd.extend([
                 "--write-auto-subs",
