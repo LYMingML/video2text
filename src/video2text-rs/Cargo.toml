@@ -1,0 +1,67 @@
+[package]
+name = "video2text-rs"
+version = "0.1.0"
+edition = "2021"
+authors = ["video2text contributors"]
+description = "Video/Audio to text transcription service in Rust"
+
+[dependencies]
+# Web framework
+axum = { version = "0.7", features = ["multipart"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["fs", "cors", "trace"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Python bindings - 使用 subprocess 方案更简单可靠
+# pyo3 = { version = "0.22", features = ["auto-initialize"] }
+# pyo3-asyncio = { version = "0.22", features = ["tokio-runtime"] }
+
+# HTTP client for translation
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# File/path
+walkdir = "2"
+tempfile = "3"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging and tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Compression
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# UUID generation
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Regex
+regex = "1"
+
+# Environment
+dotenvy = "0.15"
+
+# Base64 for external API
+base64 = "0.22"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 0
+debug = true

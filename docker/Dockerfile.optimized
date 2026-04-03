@@ -1,0 +1,119 @@
+# video2text GPU Dockerfile - Optimized Version
+# 目标：减少镜像体积同时保持 GPU 加速
+# 优化策略：
+# 1. 使用 NVIDIA CUDA 基础镜像（预装 CUDA，更精简）
+# 2. 只预下载核心模型（paraformer-zh），其他运行时按需下载
+# 3. 清理缓存和临时文件
+# 4. 合并 RUN 指令减少层数
+
+# ============================================================
+# Stage 1: Builder
+# ============================================================
+FROM nvidia/cuda:12.1.0-cudnn8-devel-ubuntu22.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+# 使用清华镜像加速
+RUN sed -i "s/archive.ubuntu.com/mirrors.tuna.tsinghua.edu.cn/g" /etc/apt/sources.list && \
+    apt-get update && apt-get install -y --no-install-recommends \
+        python3.12 python3.12-venv python3-pip \
+        build-essential gcc git \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/*
+
+# 创建虚拟环境
+RUN python3.12 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+WORKDIR /build
+
+# 安装 PyTorch GPU（精简版）
+RUN pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --upgrade pip && \
+    pip install -i https://pypi.tuna.tsinghua.edu.cn/simple \
+        --index-url https://download.pytorch.org/whl/cu121 \
+        torch==2.3.1+cu121 torchaudio==2.3.1+cu121
+
+# 复制项目文件并安装依赖
+COPY pyproject.toml README.md ./
+COPY backend ./backend
+COPY utils ./utils
+RUN pip install -i https://pypi.tuna.tsinghua.edu.cn/simple .
+
+# 清理
+RUN find /opt/venv -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true && \
+    find /opt/venv -type d -name '*.dist-info' -exec rm -rf {}/RECORD \; 2>/dev/null || true && \
+    rm -rf /root/.cache/pip /tmp/*
+
+# ============================================================
+# Stage 2: Model Downloader（只下载核心模型）
+# ============================================================
+FROM builder AS model-downloader
+
+ENV HF_HOME=/build/cache/huggingface \
+    HF_ENDPOINT=https://hf-mirror.com \
+    MODELSCOPE_CACHE=/build/cache/modelscope \
+    TORCH_HOME=/build/cache/torch
+
+# 只下载最核心的 paraformer-zh 模型（~1GB）
+# 其他模型运行时按需下载
+RUN pip install -i https://pypi.tuna.tsinghua.edu.cn/simple ffmpeg-python && \
+    python -c "
+from funasr import AutoModel
+print('下载 paraformer-zh 核心模型...')
+model = AutoModel(
+    model='paraformer-zh',
+    vad_model='fsmn-vad',
+    punc_model='ct-punc',
+    device='cpu',
+    disable_update=True,
+    hub='ms',
+)
+_ = model.model
+print('✓ 核心模型下载完成')
+" && rm -rf /root/.cache/pip /tmp/*
+
+# ============================================================
+# Stage 3: Runtime（精简生产镜像）
+# ============================================================
+FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    HF_HOME=/app/.cache/huggingface \
+    HF_ENDPOINT=https://hf-mirror.com \
+    MODELSCOPE_CACHE=/app/.cache/modelscope \
+    TORCH_HOME=/app/.cache/torch \
+    GRADIO_ANALYTICS_ENABLED=false \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility,video \
+    PATH="/opt/venv/bin:$PATH"
+
+WORKDIR /app
+
+# 安装最小运行时依赖
+RUN sed -i "s/archive.ubuntu.com/mirrors.tuna.tsinghua.edu.cn/g" /etc/apt/sources.list && \
+    apt-get update && apt-get install -y --no-install-recommends \
+        python3.12 python3.12-venv \
+        ca-certificates ffmpeg \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /tmp/*
+
+# 复制虚拟环境和模型
+COPY --from=builder /opt/venv /opt/venv
+COPY --from=model-downloader /build/cache /app/.cache
+
+# 复制应用代码
+COPY pyproject.toml README.md ./
+COPY backend ./backend
+COPY utils ./utils
+COPY fastapi_app.py main.py main.sh .env.example ./
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+
+RUN chmod +x /app/docker-entrypoint.sh /app/main.sh \
+    && mkdir -p /app/workspace
+
+EXPOSE 7881
+
+ENTRYPOINT ["/app/docker-entrypoint.sh"]

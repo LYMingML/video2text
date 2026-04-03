@@ -4,7 +4,7 @@ Video/audio to subtitle tool with triple ASR backends (VibeVoice, FunASR, faster
 
 **[中文文档](docs/README_zh.md)**
 
-**Version**: v0.4.2
+**Version**: v0.4.4
 
 ## Features
 

@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "video2text": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["run", "python", "mcp_server.py"],
+      "cwd": "/home/lym/projects/video2text"
+    }
+  }
+}

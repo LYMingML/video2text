@@ -1,0 +1,6 @@
+启动 HTTP: http://0.0.0.0:7880
+启动 HTTPS: https://0.0.0.0:7881
+2026-04-03 21:58:34,673 [INFO] httpx: HTTP Request: GET https://localhost:7881/gradio_api/startup-events "HTTP/1.1 200 OK"
+2026-04-03 21:58:34,704 [INFO] httpx: HTTP Request: HEAD https://localhost:7881/ "HTTP/1.1 200 OK"
+2026-04-03 21:58:34,738 [INFO] httpx: HTTP Request: GET http://localhost:7880/gradio_api/startup-events "HTTP/1.1 200 OK"
+2026-04-03 21:58:34,768 [INFO] httpx: HTTP Request: HEAD http://localhost:7880/ "HTTP/1.1 200 OK"

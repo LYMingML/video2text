@@ -1,0 +1,17 @@
+[project]
+name = "video2text-rs-ml"
+version = "0.1.0"
+description = "Python ML wrappers for video2text-rs"
+requires-python = ">=3.12"
+dependencies = [
+    "faster-whisper>=1.1.0",
+    "funasr>=1.1.0",
+    "modelscope>=1.9.0",
+    "torch==2.3.1+cu121",
+    "torchaudio==2.3.1+cu121",
+    "numpy>=1.24.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"

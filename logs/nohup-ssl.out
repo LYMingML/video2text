@@ -1,0 +1,50 @@
+INFO:     Started server process [1125963]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on https://0.0.0.0:7881 (Press CTRL+C to quit)
+INFO:     127.0.0.1:57181 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59847 - "POST /api/download_url HTTP/1.1" 200 OK
+INFO:     192.168.1.30:13063 - "POST /api/download_url HTTP/1.1" 200 OK
+INFO:     192.168.1.30:13063 - "GET /api/history HTTP/1.1" 200 OK
+INFO:     192.168.1.30:13063 - "GET /api/folders/output-files?folder_name=2026_04_01_21_17_27 HTTP/1.1" 200 OK
+INFO:     192.168.1.30:3228 - "POST /api/jobs/import-subtitle HTTP/1.1" 200 OK
+INFO:     192.168.1.30:3228 - "GET /api/jobs/2127d98ebdb4452b9e1814072d86f5fa HTTP/1.1" 200 OK
+INFO:     192.168.1.30:1138 - "GET /api/queue/status HTTP/1.1" 200 OK
+INFO:     192.168.1.30:3228 - "GET /api/history HTTP/1.1" 200 OK
+INFO:     192.168.1.30:1138 - "GET /api/history HTTP/1.1" 200 OK
+INFO:     192.168.1.30:3228 - "GET /api/folders/output-files?folder_name=AI%E7%BF%BB%E8%AD%AF%E5%AD%97%E5%B9%95_%E7%9B%B4%E6%92%AD_%E5%B7%9D%E6%99%AE%E7%99%BC%E8%A1%A8%E5%85%A8%E5%9C%8B%E6%BC%94%E8%AA%AA_%E8%AA%AA HTTP/1.1" 200 OK
+INFO:     192.168.1.30:1138 - "GET /api/folders/output-files?folder_name=2026_04_01_21_17_27 HTTP/1.1" 200 OK
+INFO:     192.168.1.30:1138 - "GET /api/queue/status HTTP/1.1" 200 OK
+INFO:     192.168.1.30:11324 - "POST /api/transcribe/start HTTP/1.1" 200 OK
+INFO:     192.168.1.30:11324 - "GET /api/history HTTP/1.1" 200 OK
+INFO:     192.168.1.30:11324 - "GET /api/folders/output-files?folder_name=AI%E7%BF%BB%E8%AD%AF%E5%AD%97%E5%B9%95_%E7%9B%B4%E6%92%AD_%E5%B7%9D%E6%99%AE%E7%99%BC%E8%A1%A8%E5%85%A8%E5%9C%8B%E6%BC%94%E8%AA%AA_%E8%AA%AA HTTP/1.1" 200 OK
+INFO:     192.168.1.30:11324 - "GET /api/queue/status HTTP/1.1" 200 OK
+INFO:     192.168.1.30:11324 - "GET /api/jobs/87ed594bf38a44378b36561143d0d4e5 HTTP/1.1" 200 OK
+INFO:     192.168.1.30:2527 - "GET /api/queue/status HTTP/1.1" 200 OK
+INFO:     192.168.1.30:11324 - "GET /api/history HTTP/1.1" 200 OK
+INFO:     192.168.1.30:11324 - "GET /api/folders/output-files?folder_name=AI%E7%BF%BB%E8%AD%AF%E5%AD%97%E5%B9%95_%E7%9B%B4%E6%92%AD_%E5%B7%9D%E6%99%AE%E7%99%BC%E8%A1%A8%E5%85%A8%E5%9C%8B%E6%BC%94%E8%AA%AA_%E8%AA%AA HTTP/1.1" 200 OK
+2026-04-02 14:19:06,988 [INFO] video2text: [CLEANUP] 已安排 60 秒后删除临时视频: 【AI翻譯字幕】直播／川普發表全國演說　說明伊朗局勢最新進展.1Opmp7HqKFY.m4a
+2026-04-02 14:19:07,065 [INFO] video2text: 音频时长: 1356.2s，后端: faster-whisper（多语言），语言: auto
+INFO:     192.168.1.30:11324 - "GET /api/jobs/87ed594bf38a44378b36561143d0d4e5 HTTP/1.1" 200 OK
+INFO:     192.168.1.30:11324 - "GET /api/queue/status HTTP/1.1" 200 OK
+INFO:     192.168.1.30:11324 - "GET /api/jobs/87ed594bf38a44378b36561143d0d4e5 HTTP/1.1" 200 OK
+INFO:     192.168.1.30:11324 - "GET /api/jobs/87ed594bf38a44378b36561143d0d4e5 HTTP/1.1" 200 OK
+INFO:     192.168.1.30:11324 - "GET /api/jobs/87ed594bf38a44378b36561143d0d4e5 HTTP/1.1" 200 OK
+INFO:     192.168.1.30:2527 - "GET /api/jobs/87ed594bf38a44378b36561143d0d4e5 HTTP/1.1" 200 OK
+INFO:     192.168.1.30:11324 - "GET /api/queue/status HTTP/1.1" 200 OK
+2026-04-02 14:19:11,227 [INFO] video2text: [GPU] torch.cuda 检测到 GPU: Tesla P4
+INFO:     192.168.1.30:11324 - "GET /api/jobs/87ed594bf38a44378b36561143d0d4e5 HTTP/1.1" 200 OK
+INFO:     192.168.1.30:11324 - "GET /api/queue/status HTTP/1.1" 200 OK
+INFO:     192.168.1.30:2527 - "GET /api/history HTTP/1.1" 200 OK
+INFO:     192.168.1.30:2527 - "GET /api/folders/output-files?folder_name=AI%E7%BF%BB%E8%AD%AF%E5%AD%97%E5%B9%95_%E7%9B%B4%E6%92%AD_%E5%B7%9D%E6%99%AE%E7%99%BC%E8%A1%A8%E5%85%A8%E5%9C%8B%E6%BC%94%E8%AA%AA_%E8%AA%AA HTTP/1.1" 200 OK
+INFO:     192.168.1.30:2527 - "GET /api/queue/status HTTP/1.1" 200 OK
+2026-04-02 14:20:11,477 [INFO] video2text: [CLEANUP] 已删除临时视频文件: 【AI翻譯字幕】直播／川普發表全國演說　說明伊朗局勢最新進展.1Opmp7HqKFY.m4a
+INFO:     192.168.1.2:50924 - "GET /api/jobs/4012eb38393c4cd999cff48b8d3d612f/files HTTP/1.1" 404 Not Found
+INFO:     192.168.1.2:50924 - "GET /api/queue/status HTTP/1.1" 200 OK
+INFO:     192.168.1.2:50924 - "GET /api/history HTTP/1.1" 200 OK
+INFO:     192.168.1.2:50924 - "GET /api/folders/output-files?folder_name=2026_04_01_21_17_27 HTTP/1.1" 200 OK
+INFO:     192.168.1.2:50924 - "GET /api/folders/output-files?folder_name=AI%E7%BF%BB%E8%AD%AF%E5%AD%97%E5%B9%95_%E7%9B%B4%E6%92%AD_%E5%B7%9D%E6%99%AE%E7%99%BC%E8%A1%A8%E5%85%A8%E5%9C%8B%E6%BC%94%E8%AA%AA_%E8%AA%AA HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [1125963]
