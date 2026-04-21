@@ -4,7 +4,7 @@ video2text MCP Server — 纯 HTTP 客户端
 通过调用本地 FastAPI 服务（默认 http://127.0.0.1:7881）暴露全部功能为 MCP Tools。
 不 import 任何重型模块（torch/funasr/transformers），所有 GPU 工作由 FastAPI 进程完成。
 
-启动: uv run python mcp_server.py
+启动: uv run python src/mcp_server.py
 """
 
 from __future__ import annotations
@@ -13,95 +13,130 @@ import asyncio
 import base64
 import json
 import os
-import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import httpx
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 # ---------------------------------------------------------------------------
 # 配置
 # ---------------------------------------------------------------------------
 
-DEFAULT_BASE_URL = os.environ.get("VIDEO2TEXT_URL", "https://127.0.0.1:7881")
+DEFAULT_BASE_URL = os.environ.get("VIDEO2TEXT_URL", "http://127.0.0.1:7881")
 _TIMEOUT = 600.0  # 转录/翻译可能很慢，10 分钟超时
 
-mcp = FastMCP("video2text", instructions=(
-    "video2text: 视频/音频转字幕工具。支持转录(ASR)、翻译、下载视频等功能。\n"
-    "使用前请确保 FastAPI 服务已启动（默认 http://127.0.0.1:7881）。"
-))
+
+@asynccontextmanager
+async def _app_lifespan(app: FastMCP):
+    """管理全局 HTTP Client 生命周期。"""
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        yield {"client": client}
+
+
+mcp = FastMCP(
+    "video2text",
+    lifespan=_app_lifespan,
+    instructions=(
+        "video2text: 视频/音频转字幕工具。支持转录(ASR)、翻译、下载视频等功能。\n"
+        "使用前请确保 FastAPI 服务已启动（默认 http://127.0.0.1:7881）。"
+    ),
+)
 
 
 # ---------------------------------------------------------------------------
 # HTTP 辅助
 # ---------------------------------------------------------------------------
 
-async def _get(path: str, params: dict | None = None) -> Any:
-    async with httpx.AsyncClient(timeout=_TIMEOUT, verify=False) as c:
-        r = await c.get(f"{DEFAULT_BASE_URL}{path}", params=params)
-        r.raise_for_status()
+def _client(ctx: Context) -> httpx.AsyncClient:
+    return ctx.request_context.lifespan_context["client"]
+
+
+async def _get(ctx: Context, path: str, params: dict | None = None) -> Any:
+    r = await _client(ctx).get(f"{DEFAULT_BASE_URL}{path}", params=params)
+    r.raise_for_status()
+    return r.json()
+
+
+async def _post(
+    ctx: Context,
+    path: str,
+    data: dict | None = None,
+    files: dict | None = None,
+    raw: bool = False,
+) -> Any:
+    if files:
+        r = await _client(ctx).post(f"{DEFAULT_BASE_URL}{path}", data=data, files=files)
+    else:
+        r = await _client(ctx).post(f"{DEFAULT_BASE_URL}{path}", json=data)
+    r.raise_for_status()
+    if raw:
+        return r.content
+    ct = r.headers.get("content-type", "")
+    if "json" in ct:
         return r.json()
+    return r.text
 
 
-async def _post(path: str, data: dict | None = None, files: dict | None = None,
-                raw: bool = False) -> Any:
-    async with httpx.AsyncClient(timeout=_TIMEOUT, verify=False) as c:
-        if files:
-            r = await c.post(f"{DEFAULT_BASE_URL}{path}", data=data, files=files)
-        else:
-            r = await c.post(f"{DEFAULT_BASE_URL}{path}", json=data)
-        r.raise_for_status()
-        if raw:
-            return r.content
-        ct = r.headers.get("content-type", "")
-        if "json" in ct:
-            return r.json()
-        return r.text
+async def _post_form(
+    ctx: Context,
+    path: str,
+    fields: dict[str, str],
+    file_path: str | None = None,
+    file_field: str = "file",
+) -> Any:
+    data = {k: (None, v) for k, v in fields.items()}
+    if file_path:
+        p = Path(file_path)
+        data[file_field] = (p.name, p.read_bytes(), _guess_mime(p.name))
+    r = await _client(ctx).post(f"{DEFAULT_BASE_URL}{path}", files=data)
+    r.raise_for_status()
+    ct = r.headers.get("content-type", "")
+    if "json" in ct:
+        return r.json()
+    return r.text
 
 
-async def _post_form(path: str, fields: dict[str, str],
-                     file_path: str | None = None,
-                     file_field: str = "file") -> Any:
-    """提交 multipart/form-data 请求。"""
-    async with httpx.AsyncClient(timeout=_TIMEOUT, verify=False) as c:
-        data = {k: (None, v) for k, v in fields.items()}
-        if file_path:
-            p = Path(file_path)
-            data[file_field] = (p.name, p.read_bytes(), _guess_mime(p.name))
-        r = await c.post(f"{DEFAULT_BASE_URL}{path}", files=data)
-        r.raise_for_status()
-        ct = r.headers.get("content-type", "")
-        if "json" in ct:
-            return r.json()
-        return r.text
+async def _read_text_from_api(ctx: Context, path: str, params: dict | None = None) -> str:
+    """通过 API 读取文本内容。"""
+    r = await _client(ctx).get(f"{DEFAULT_BASE_URL}{path}", params=params)
+    r.raise_for_status()
+    return r.text
 
 
 def _guess_mime(name: str) -> str:
     ext = Path(name).suffix.lower()
     return {
-        ".mp4": "video/mp4", ".mkv": "video/x-matroska", ".avi": "video/x-msvideo",
-        ".webm": "video/webm", ".mov": "video/quicktime", ".flv": "video/x-flv",
-        ".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4",
-        ".flac": "audio/flac", ".ogg": "audio/ogg", ".aac": "audio/aac",
-        ".srt": "text/plain", ".txt": "text/plain",
+        ".mp4": "video/mp4",
+        ".mkv": "video/x-matroska",
+        ".avi": "video/x-msvideo",
+        ".webm": "video/webm",
+        ".mov": "video/quicktime",
+        ".flv": "video/x-flv",
+        ".wav": "audio/wav",
+        ".mp3": "audio/mpeg",
+        ".m4a": "audio/mp4",
+        ".flac": "audio/flac",
+        ".ogg": "audio/ogg",
+        ".aac": "audio/aac",
+        ".srt": "text/plain",
+        ".txt": "text/plain",
+        ".vtt": "text/plain",
+        ".zip": "application/zip",
     }.get(ext, "application/octet-stream")
 
 
-def _srt_segments_to_text(segments: list) -> str:
-    """将 segments 列表格式化为可读文本。"""
-    lines = []
-    for i, (start, end, text) in enumerate(segments, 1):
-        lines.append(f"{i}\n{_s_time(start)} --> {_s_time(end)}\n{text}")
-    return "\n\n".join(lines)
+def _fmt_json(data: Any) -> str:
+    return json.dumps(data, ensure_ascii=False, indent=2)
 
 
-def _s_time(s: float) -> str:
-    h = int(s) // 3600
-    m = (int(s) % 3600) // 60
-    sec = int(s) % 60
-    ms = int((s - int(s)) * 1000)
-    return f"{h:02d}:{m:02d}:{sec:02d},{ms:03d}"
+def _http_err(e: httpx.HTTPStatusError) -> str:
+    try:
+        detail = e.response.json()
+        return _fmt_json(detail)
+    except Exception:
+        return e.response.text or str(e)
 
 
 # ---------------------------------------------------------------------------
@@ -109,21 +144,24 @@ def _s_time(s: float) -> str:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-async def v2t_health() -> str:
+async def v2t_health(ctx: Context) -> str:
     """检查 video2text 服务是否运行正常。"""
     try:
-        r = await _get("/health")
-        return json.dumps(r, ensure_ascii=False, indent=2)
+        r = await _get(ctx, "/health")
+        return _fmt_json(r)
     except Exception as e:
         return f"❌ 服务不可用: {e}"
 
 
 @mcp.tool()
 async def v2t_transcribe_file(
+    ctx: Context,
     file_path: str,
     backend: str = "",
     language: str = "自动检测",
     device: str = "CUDA",
+    whisper_model: str = "",
+    funasr_model: str = "",
     auto_translate: bool = False,
     target_lang: str = "zh",
     online_profile: str = "",
@@ -134,9 +172,11 @@ async def v2t_transcribe_file(
 
     Args:
         file_path: 本地视频/音频文件绝对路径
-        backend: ASR 后端（留空用默认）, 如 "FunASR（Paraformer）", "faster-whisper"
+        backend: ASR 后端（留空用默认），如 "FunASR(Paraformer)", "faster-whisper"
         language: 语言，如 "zh", "en", "ja", "自动检测"
         device: 计算设备 "CUDA" 或 "CPU"
+        whisper_model: Whisper 模型名（留空用默认）
+        funasr_model: FunASR 模型名（留空用默认）
         auto_translate: 是否自动翻译
         target_lang: 翻译目标语言（auto_translate=True 时生效）
         online_profile: 翻译配置组名
@@ -146,32 +186,35 @@ async def v2t_transcribe_file(
     if not p.exists():
         return f"❌ 文件不存在: {file_path}"
 
-    # 1. 上传文件并启动转录
     fields = {
         "backend": backend,
         "language": language,
         "device": device,
+        "whisper_model": whisper_model,
+        "funasr_model": funasr_model,
         "auto_translate": "1" if auto_translate else "0",
     }
     try:
-        resp = await _post_form("/api/transcribe/start", fields, file_path=file_path, file_field="video_file")
+        resp = await _post_form(ctx, "/api/transcribe/start", fields, file_path=file_path, file_field="video_file")
     except httpx.HTTPStatusError as e:
-        return f"❌ 启动转录失败: {e.response.text}"
+        return f"❌ 启动转录失败: {_http_err(e)}"
 
     job_id = resp.get("job_id", "")
     if not job_id:
         return f"❌ 未获取到 job_id: {resp}"
 
-    # 2. 轮询等待完成
-    return await _poll_job(job_id, expect_translation=auto_translate)
+    return await _poll_job(ctx, job_id, expect_translation=auto_translate)
 
 
 @mcp.tool()
 async def v2t_transcribe_url(
+    ctx: Context,
     url: str,
     backend: str = "",
     language: str = "自动检测",
     device: str = "CUDA",
+    whisper_model: str = "",
+    funasr_model: str = "",
     auto_translate: bool = False,
     target_lang: str = "zh",
     online_profile: str = "",
@@ -188,58 +231,70 @@ async def v2t_transcribe_url(
         backend: ASR 后端（留空用默认）
         language: 语言
         device: 计算设备
+        whisper_model: Whisper 模型名（留空用默认）
+        funasr_model: FunASR 模型名（留空用默认）
         auto_translate: 是否自动翻译
         target_lang: 翻译目标语言
         online_profile: 翻译配置组名
         online_model: 翻译模型名
         auto_subtitle_lang: 平台字幕优先语言
     """
-    # 1. 下载视频
     try:
-        dl = await _post("/api/download_url", {"url": url})
+        dl = await _post(ctx, "/api/download_url", {"url": url, "auto_subtitle_lang": auto_subtitle_lang})
     except httpx.HTTPStatusError as e:
-        return f"❌ 下载失败: {e.response.text}"
+        return f"❌ 下载失败: {_http_err(e)}"
 
     filepath = dl.get("filepath", "")
     subtitle_path = dl.get("subtitle_path", "")
     if not filepath:
         return f"❌ 下载失败，未获取到文件路径: {dl}"
 
-    # 2. 如果有平台自动字幕，直接导入
+    # 如果有平台自动字幕，直接导入
     if subtitle_path:
         try:
-            imp = await _post("/api/jobs/import-subtitle", {
-                "media_path": filepath,
+            imp = await _post(ctx, "/api/jobs/import-subtitle", {
+                "history_video": filepath,
                 "subtitle_path": subtitle_path,
             })
             job_id = imp.get("job_id", "")
             if job_id:
-                return await _poll_job(job_id, expect_translation=auto_translate)
-        except Exception:
+                # 等待导入完成
+                result = await _poll_job(ctx, job_id, expect_translation=False)
+                if auto_translate:
+                    # 导入完成后启动翻译
+                    trans_result = await _do_translate(ctx, job_id, target_lang, online_profile, online_model)
+                    if trans_result.startswith("❌"):
+                        return trans_result
+                    return await _poll_job(ctx, job_id, expect_translation=True)
+                return result
+        except httpx.HTTPStatusError:
             pass  # 导入失败，继续走 ASR
 
-    # 3. 启动转录（用历史视频方式）
+    # 走 ASR 转录
     fields = {
         "history_video": filepath,
         "backend": backend,
         "language": language,
         "device": device,
+        "whisper_model": whisper_model,
+        "funasr_model": funasr_model,
         "auto_translate": "1" if auto_translate else "0",
     }
     try:
-        resp = await _post_form("/api/transcribe/start", fields)
+        resp = await _post_form(ctx, "/api/transcribe/start", fields)
     except httpx.HTTPStatusError as e:
-        return f"❌ 启动转录失败: {e.response.text}"
+        return f"❌ 启动转录失败: {_http_err(e)}"
 
     job_id = resp.get("job_id", "")
     if not job_id:
         return f"❌ 未获取到 job_id: {resp}"
 
-    return await _poll_job(job_id, expect_translation=auto_translate)
+    return await _poll_job(ctx, job_id, expect_translation=auto_translate)
 
 
 @mcp.tool()
 async def v2t_translate(
+    ctx: Context,
     job_id: str,
     target_lang: str = "zh",
     online_profile: str = "",
@@ -256,35 +311,46 @@ async def v2t_translate(
         online_model: 翻译模型名（留空用默认）
         parallel_threads: 并行线程数
     """
+    trans = await _do_translate(ctx, job_id, target_lang, online_profile, online_model, parallel_threads)
+    if trans.startswith("❌"):
+        return trans
+    return await _poll_job(ctx, job_id, expect_translation=True)
+
+
+async def _do_translate(
+    ctx: Context,
+    job_id: str,
+    target_lang: str,
+    online_profile: str,
+    online_model: str,
+    parallel_threads: int = 5,
+) -> str:
     try:
-        await _post(f"/api/jobs/{job_id}/translate", {
+        await _post(ctx, f"/api/jobs/{job_id}/translate", {
             "target_lang": target_lang,
             "online_profile": online_profile,
             "online_model": online_model,
             "parallel_threads": str(parallel_threads),
         })
     except httpx.HTTPStatusError as e:
-        return f"❌ 启动翻译失败: {e.response.text}"
-
-    return await _poll_job(job_id, expect_translation=True)
+        return f"❌ 启动翻译失败: {_http_err(e)}"
+    return "✅ 已启动翻译"
 
 
 @mcp.tool()
 async def v2t_extract_audio(
+    ctx: Context,
     file_path: str,
     output_path: str = "",
 ) -> str:
     """
-    从视频文件中提取 WAV 音频（通过 FastAPI 服务）。
-    注意：此功能通过上传文件到服务端实现。
+    从视频文件中提取 WAV 音频。
+    通过统一处理入口完成，返回音频文件信息。
 
     Args:
         file_path: 本地视频/音频文件路径
-        output_path: 输出 WAV 路径（留空自动生成）
+        output_path: 输出 WAV 路径（留空则仅返回任务信息）
     """
-    # 直接上传文件触发转录，只返回 WAV 路径信息
-    # 由于 FastAPI 没有单独的 extract-audio 端点，
-    # 这里用外部 API 同步处理
     p = Path(file_path)
     if not p.exists():
         return f"❌ 文件不存在: {file_path}"
@@ -293,32 +359,48 @@ async def v2t_extract_audio(
         content = base64.b64encode(f.read()).decode()
 
     try:
-        resp = await _post("/api/external/process", {
+        resp = await _post(ctx, "/api/external/process", {
             "source_type": "base64",
-            "base64_data": content,
+            "media_base64": content,
             "filename": p.name,
-            "output_mode": "json",
+            "output_mode": "json-base64",
             "target_lang": "none",
         })
     except httpx.HTTPStatusError as e:
-        return f"❌ 处理失败: {e.response.text}"
+        return f"❌ 处理失败: {_http_err(e)}"
 
     if isinstance(resp, dict) and resp.get("files"):
         files = resp["files"]
-        return json.dumps({
-            "message": "转录完成（含音频提取）",
+        wav_files = [f for f in files if f.lower().endswith(".wav")]
+        result = {
+            "message": "处理完成",
             "job_id": resp.get("job_id"),
+            "current_job": resp.get("current_job"),
             "files": files,
-        }, ensure_ascii=False, indent=2)
-    return json.dumps(resp, ensure_ascii=False, indent=2)
+            "wav_files": wav_files,
+        }
+        if output_path and wav_files:
+            # 下载第一个 wav 文件到本地
+            job_dir = resp.get("current_job", "")
+            if job_dir:
+                try:
+                    wav_bytes = await _post(
+                        ctx,
+                        "/api/folders/download-output",
+                        {"folder_name": job_dir, "files": [wav_files[0]]},
+                        raw=True,
+                    )
+                    Path(output_path).write_bytes(wav_bytes)
+                    result["saved_to"] = output_path
+                except Exception as e:
+                    result["save_error"] = str(e)
+        return _fmt_json(result)
+    return _fmt_json(resp)
 
-
-# ---------------------------------------------------------------------------
-# Tools — 外部 API 同步调用（一步到位）
-# ---------------------------------------------------------------------------
 
 @mcp.tool()
 async def v2t_process(
+    ctx: Context,
     source_type: str,
     url: str = "",
     file_path: str = "",
@@ -326,6 +408,8 @@ async def v2t_process(
     backend: str = "",
     language: str = "自动检测",
     device: str = "CUDA",
+    whisper_model: str = "",
+    funasr_model: str = "",
     target_lang: str = "",
     online_profile: str = "",
     online_model: str = "",
@@ -345,6 +429,8 @@ async def v2t_process(
         backend: ASR 后端（留空用默认）
         language: 语言
         device: "CUDA" 或 "CPU"
+        whisper_model: Whisper 模型名（留空用默认）
+        funasr_model: FunASR 模型名（留空用默认）
         target_lang: 翻译目标语言（留空则不翻译）
         online_profile: 翻译配置组名
         online_model: 翻译模型名
@@ -356,12 +442,14 @@ async def v2t_process(
         "backend": backend,
         "language": language,
         "device": device,
+        "whisper_model": whisper_model,
+        "funasr_model": funasr_model,
         "target_lang": target_lang,
         "online_profile": online_profile,
         "online_model": online_model,
         "auto_subtitle_lang": auto_subtitle_lang,
         "force_asr": force_asr,
-        "output_mode": "json",
+        "output_mode": "json-base64",
     }
 
     if source_type == "url" and url:
@@ -374,21 +462,15 @@ async def v2t_process(
             return f"❌ 文件不存在: {file_path}"
         with open(p, "rb") as f:
             payload["source_type"] = "base64"
-            payload["base64_data"] = base64.b64encode(f.read()).decode()
+            payload["media_base64"] = base64.b64encode(f.read()).decode()
             payload["filename"] = p.name
 
     try:
-        resp = await _post("/api/external/process", payload)
+        resp = await _post(ctx, "/api/external/process", payload)
     except httpx.HTTPStatusError as e:
-        detail = e.response.text
-        try:
-            detail = json.dumps(e.response.json(), ensure_ascii=False)
-        except Exception:
-            pass
-        return f"❌ 处理失败: {detail}"
+        return f"❌ 处理失败: {_http_err(e)}"
 
     if isinstance(resp, dict):
-        # 读取输出文件内容
         files = resp.get("files", [])
         job_dir = resp.get("current_job", "")
         result = {
@@ -399,14 +481,16 @@ async def v2t_process(
         }
         # 尝试读取原文 SRT
         for f in files:
-            if f.endswith(".srt") and ".zh." not in f and ".en." not in f:
+            if f.endswith(".srt") and ".zh." not in f and ".en." not in f and ".ja." not in f and ".ko." not in f:
                 try:
-                    content = await _get_file_content(job_dir, f)
+                    content = await _read_text_from_api(
+                        ctx, f"/api/jobs/{resp.get('job_id')}/download-file", {"file_name": f}
+                    )
                     result["srt_content"] = content
                     break
                 except Exception:
                     pass
-        return json.dumps(result, ensure_ascii=False, indent=2)
+        return _fmt_json(result)
 
     return str(resp)
 
@@ -416,29 +500,31 @@ async def v2t_process(
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-async def v2t_list_folders(max_items: int = 50) -> str:
+async def v2t_list_folders(ctx: Context, max_items: int = 50) -> str:
     """列出 workspace 中所有任务文件夹（名称、大小、修改时间）。"""
     try:
-        resp = await _get("/api/history")
+        resp = await _get(ctx, "/api/history")
     except Exception as e:
         return f"❌ 获取失败: {e}"
 
-    folders = resp.get("folders", [])
+    folders = resp.get("folders_meta", resp.get("folders", []))
     folders = folders[:max_items]
     if not folders:
         return "暂无任务文件夹"
 
     lines = ["## Workspace 文件夹列表\n"]
     for f in folders:
-        name = f.get("name", "?")
-        mtime = f.get("mtime", 0)
-        size = f.get("size", 0)
-        lines.append(f"- **{name}** ({size:.1f} MB)")
+        if isinstance(f, dict):
+            name = f.get("name", "?")
+            size = f.get("size", 0)
+            lines.append(f"- **{name}** ({size:.1f} MB)")
+        else:
+            lines.append(f"- **{f}**")
     return "\n".join(lines)
 
 
 @mcp.tool()
-async def v2t_list_files(folder_name: str) -> str:
+async def v2t_list_files(ctx: Context, folder_name: str) -> str:
     """
     列出指定任务文件夹内的输出文件。
 
@@ -446,9 +532,9 @@ async def v2t_list_files(folder_name: str) -> str:
         folder_name: 文件夹名称（来自 v2t_list_folders）
     """
     try:
-        resp = await _get("/api/folders/output-files", {"folder_name": folder_name})
+        resp = await _get(ctx, "/api/folders/output-files", {"folder_name": folder_name})
     except httpx.HTTPStatusError as e:
-        return f"❌ 获取失败: {e.response.text}"
+        return f"❌ 获取失败: {_http_err(e)}"
 
     files = resp.get("files", [])
     if not files:
@@ -463,7 +549,7 @@ async def v2t_list_files(folder_name: str) -> str:
 
 
 @mcp.tool()
-async def v2t_read_file(folder_name: str, file_name: str) -> str:
+async def v2t_read_file(ctx: Context, folder_name: str, file_name: str) -> str:
     """
     读取任务文件夹中指定文件的内容（SRT/TXT）。
 
@@ -471,26 +557,27 @@ async def v2t_read_file(folder_name: str, file_name: str) -> str:
         folder_name: 文件夹名称
         file_name: 文件名（如 "video.srt", "video.zh.txt"）
     """
-    return await _get_file_content(folder_name, file_name)
-
-
-async def _get_file_content(folder_name: str, file_name: str) -> str:
-    """读取 workspace 文件内容的内部函数。"""
-    # 安全拼接路径并读取
-    from core.config import WORKSPACE_DIR
-    p = WORKSPACE_DIR / folder_name / file_name
-    # 安全校验
+    # 通过 folders/download-output 下载单文件，后端对单文件直接返回 FileResponse
     try:
-        p.resolve().relative_to(WORKSPACE_DIR.resolve())
-    except ValueError:
-        return "❌ 非法路径"
-    if not p.exists():
-        return f"❌ 文件不存在: {folder_name}/{file_name}"
-    return p.read_text(encoding="utf-8", errors="replace")
+        content = await _post(
+            ctx,
+            "/api/folders/download-output",
+            {"folder_name": folder_name, "files": [file_name]},
+            raw=True,
+        )
+        # 尝试按文本解码
+        try:
+            return content.decode("utf-8")
+        except UnicodeDecodeError:
+            return f"❌ 文件不是文本类型，大小 {len(content)} bytes"
+    except httpx.HTTPStatusError as e:
+        return f"❌ 读取失败: {_http_err(e)}"
+    except Exception as e:
+        return f"❌ 读取失败: {e}"
 
 
 @mcp.tool()
-async def v2t_delete_folder(folder_name: str) -> str:
+async def v2t_delete_folder(ctx: Context, folder_name: str) -> str:
     """
     删除 workspace 中的指定任务文件夹。
 
@@ -498,14 +585,14 @@ async def v2t_delete_folder(folder_name: str) -> str:
         folder_name: 文件夹名称
     """
     try:
-        resp = await _post("/api/folders/delete", {"folder_name": folder_name})
+        resp = await _post(ctx, "/api/folders/delete", {"folder_name": folder_name})
     except httpx.HTTPStatusError as e:
-        return f"❌ 删除失败: {e.response.text}"
+        return f"❌ 删除失败: {_http_err(e)}"
     return resp.get("message", "已删除")
 
 
 @mcp.tool()
-async def v2t_delete_folders(folder_names: list[str]) -> str:
+async def v2t_delete_folders(ctx: Context, folder_names: list[str]) -> str:
     """
     批量删除 workspace 文件夹。
 
@@ -513,47 +600,41 @@ async def v2t_delete_folders(folder_names: list[str]) -> str:
         folder_names: 文件夹名称列表
     """
     try:
-        resp = await _post("/api/folders/delete-batch", {"folder_names": folder_names})
+        resp = await _post(ctx, "/api/folders/delete-batch", {"folder_names": folder_names})
     except httpx.HTTPStatusError as e:
-        return f"❌ 批量删除失败: {e.response.text}"
-    return json.dumps(resp, ensure_ascii=False, indent=2)
+        return f"❌ 批量删除失败: {_http_err(e)}"
+    return _fmt_json(resp)
 
 
 @mcp.tool()
-async def v2t_download_file(folder_name: str, file_name: str, save_to: str = "") -> str:
+async def v2t_download_file(ctx: Context, folder_name: str, file_name: str, save_to: str = "") -> str:
     """
     下载 workspace 文件到本地。
 
     Args:
         folder_name: 文件夹名称
         file_name: 文件名
-        save_to: 本地保存路径（留空则返回内容）
+        save_to: 本地保存路径（留空则返回文本内容，二进制返回 base64）
     """
     try:
         content = await _post(
-            f"/api/jobs/dummy/download-file",
+            ctx,
+            "/api/folders/download-output",
+            {"folder_name": folder_name, "files": [file_name]},
             raw=True,
-            # 使用直接路径方式
         )
-    except Exception:
-        pass
-
-    # 直接从磁盘读取
-    from core.config import WORKSPACE_DIR
-    p = WORKSPACE_DIR / folder_name / file_name
-    try:
-        p.resolve().relative_to(WORKSPACE_DIR.resolve())
-    except ValueError:
-        return "❌ 非法路径"
-    if not p.exists():
-        return f"❌ 文件不存在: {folder_name}/{file_name}"
+    except httpx.HTTPStatusError as e:
+        return f"❌ 下载失败: {_http_err(e)}"
 
     if save_to:
-        import shutil
-        shutil.copy2(str(p), save_to)
-        return f"✅ 已保存到 {save_to}"
+        Path(save_to).write_bytes(content)
+        return f"✅ 已保存到 {save_to} ({len(content)} bytes)"
 
-    return p.read_text(encoding="utf-8", errors="replace")
+    # 尝试文本解码
+    try:
+        return content.decode("utf-8")
+    except UnicodeDecodeError:
+        return base64.b64encode(content).decode("ascii")
 
 
 # ---------------------------------------------------------------------------
@@ -561,10 +642,10 @@ async def v2t_download_file(folder_name: str, file_name: str, save_to: str = "")
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-async def v2t_list_backends() -> str:
+async def v2t_list_backends(ctx: Context) -> str:
     """列出可用的 ASR 和翻译后端信息。"""
     try:
-        resp = await _get("/api/backends")
+        resp = await _get(ctx, "/api/backends")
     except Exception as e:
         return f"❌ 获取失败: {e}"
 
@@ -573,13 +654,13 @@ async def v2t_list_backends() -> str:
         name = b.get("name", "?")
         desc = b.get("description", "")
         model = b.get("default_model", "")
-        models = b.get("supported_models", [])
         sr = b.get("sample_rate", 16000)
         chunk = b.get("default_chunk_seconds", 120)
         lines.append(f"### {name}")
         lines.append(f"- 描述: {desc}")
         lines.append(f"- 默认模型: {model}")
         lines.append(f"- 采样率: {sr}Hz, 切片: {chunk}s")
+        models = b.get("supported_models", [])
         if models:
             lines.append(f"- 支持模型: {', '.join(models[:8])}")
         lines.append("")
@@ -594,10 +675,10 @@ async def v2t_list_backends() -> str:
 
 
 @mcp.tool()
-async def v2t_list_translate_profiles() -> str:
+async def v2t_list_translate_profiles(ctx: Context) -> str:
     """列出翻译配置组及其模型列表。"""
     try:
-        resp = await _get("/api/model/profiles")
+        resp = await _get(ctx, "/api/model/profiles")
     except Exception as e:
         return f"❌ 获取失败: {e}"
 
@@ -627,15 +708,15 @@ async def v2t_list_translate_profiles() -> str:
 
 
 @mcp.tool()
-async def v2t_get_settings() -> str:
+async def v2t_get_settings(ctx: Context) -> str:
     """获取当前应用配置（端口、默认后端、代理等）。"""
     try:
-        resp = await _get("/api/model/profiles")
+        resp = await _get(ctx, "/api/model/profiles")
     except Exception as e:
         return f"❌ 获取失败: {e}"
 
     app = resp.get("app_settings", {})
-    return json.dumps(app, ensure_ascii=False, indent=2)
+    return _fmt_json(app)
 
 
 # ---------------------------------------------------------------------------
@@ -643,7 +724,7 @@ async def v2t_get_settings() -> str:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-async def v2t_download_video(url: str, auto_subtitle_lang: str = "zh") -> str:
+async def v2t_download_video(ctx: Context, url: str, auto_subtitle_lang: str = "zh") -> str:
     """
     仅下载视频（不转录），返回文件路径信息。
 
@@ -654,12 +735,12 @@ async def v2t_download_video(url: str, auto_subtitle_lang: str = "zh") -> str:
         auto_subtitle_lang: 平台字幕优先语言
     """
     try:
-        resp = await _post("/api/download_url", {
+        resp = await _post(ctx, "/api/download_url", {
             "url": url,
             "auto_subtitle_lang": auto_subtitle_lang,
         })
     except httpx.HTTPStatusError as e:
-        return f"❌ 下载失败: {e.response.text}"
+        return f"❌ 下载失败: {_http_err(e)}"
 
     lines = ["✅ 下载成功\n"]
     lines.append(f"- 文件: {resp.get('filename', '')}")
@@ -677,7 +758,7 @@ async def v2t_download_video(url: str, auto_subtitle_lang: str = "zh") -> str:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-async def v2t_job_status(job_id: str) -> str:
+async def v2t_job_status(ctx: Context, job_id: str) -> str:
     """
     查询任务状态。
 
@@ -685,14 +766,14 @@ async def v2t_job_status(job_id: str) -> str:
         job_id: 任务 ID
     """
     try:
-        resp = await _get(f"/api/jobs/{job_id}")
+        resp = await _get(ctx, f"/api/jobs/{job_id}")
     except Exception as e:
         return f"❌ 查询失败: {e}"
-    return json.dumps(resp, ensure_ascii=False, indent=2)
+    return _fmt_json(resp)
 
 
 @mcp.tool()
-async def v2t_stop_job(job_id: str) -> str:
+async def v2t_stop_job(ctx: Context, job_id: str) -> str:
     """
     停止运行中的任务。
 
@@ -700,32 +781,32 @@ async def v2t_stop_job(job_id: str) -> str:
         job_id: 任务 ID
     """
     try:
-        await _post(f"/api/jobs/{job_id}/stop", {})
+        await _post(ctx, f"/api/jobs/{job_id}/stop", {})
     except Exception as e:
         return f"❌ 停止失败: {e}"
     return "✅ 已发送停止请求"
 
 
 @mcp.tool()
-async def v2t_queue_status() -> str:
+async def v2t_queue_status(ctx: Context) -> str:
     """查看任务队列状态（运行中/排队/历史）。"""
     try:
-        resp = await _get("/api/queue/status")
+        resp = await _get(ctx, "/api/queue/status")
     except Exception as e:
         return f"❌ 获取失败: {e}"
-    return json.dumps(resp, ensure_ascii=False, indent=2)
+    return _fmt_json(resp)
 
 
 @mcp.tool()
-async def v2t_list_history() -> str:
+async def v2t_list_history(ctx: Context) -> str:
     """列出可用的历史视频和所有文件夹。"""
     try:
-        resp = await _get("/api/history")
+        resp = await _get(ctx, "/api/history")
     except Exception as e:
         return f"❌ 获取失败: {e}"
 
     videos = resp.get("videos", [])
-    folders = resp.get("folders", [])
+    folders = resp.get("folders_meta", resp.get("folders", []))
 
     lines = []
     if videos:
@@ -736,15 +817,19 @@ async def v2t_list_history() -> str:
     if folders:
         lines.append("\n## 任务文件夹\n")
         for f in folders[:30]:
-            name = f.get("name", "?")
-            size = f.get("size", 0)
-            lines.append(f"- **{name}** ({size:.1f} MB)")
+            if isinstance(f, dict):
+                name = f.get("name", "?")
+                size = f.get("size", 0)
+                lines.append(f"- **{name}** ({size:.1f} MB)")
+            else:
+                lines.append(f"- **{f}**")
 
     return "\n".join(lines) if lines else "暂无历史记录"
 
 
 @mcp.tool()
 async def v2t_folder_translate(
+    ctx: Context,
     folder_name: str,
     target_lang: str = "zh",
     online_profile: str = "",
@@ -760,21 +845,24 @@ async def v2t_folder_translate(
         online_model: 翻译模型名
     """
     try:
-        resp = await _post("/api/folders/translate", {
+        resp = await _post(ctx, "/api/folders/translate", {
             "folder_name": folder_name,
             "target_lang": target_lang,
             "online_profile": online_profile,
             "online_model": online_model,
         })
     except httpx.HTTPStatusError as e:
-        return f"❌ 翻译失败: {e.response.text}"
+        return f"❌ 翻译失败: {_http_err(e)}"
 
-    # 翻译是同步的，直接返回结果
-    return json.dumps(resp, ensure_ascii=False, indent=2)
+    job_id = resp.get("job_id", "")
+    if job_id:
+        return await _poll_job(ctx, job_id, expect_translation=True)
+
+    return _fmt_json(resp)
 
 
 @mcp.tool()
-async def v2t_upload_cookie(file_path: str) -> str:
+async def v2t_upload_cookie(ctx: Context, file_path: str) -> str:
     """
     上传 Cookie 文件用于需要登录的平台下载。
 
@@ -786,21 +874,22 @@ async def v2t_upload_cookie(file_path: str) -> str:
         return f"❌ 文件不存在: {file_path}"
     try:
         resp = await _post_form(
+            ctx,
             "/api/upload_cookie",
             {},
             file_path=file_path,
             file_field="cookie_file",
         )
     except httpx.HTTPStatusError as e:
-        return f"❌ 上传失败: {e.response.text}"
+        return f"❌ 上传失败: {_http_err(e)}"
     return "✅ Cookie 文件已上传"
 
 
 @mcp.tool()
-async def v2t_all_output_files() -> str:
+async def v2t_all_output_files(ctx: Context) -> str:
     """列出所有文件夹的全部输出文件（跨文件夹汇总）。"""
     try:
-        resp = await _get("/api/folders/all-output-files")
+        resp = await _get(ctx, "/api/folders/all-output-files")
     except Exception as e:
         return f"❌ 获取失败: {e}"
 
@@ -821,8 +910,13 @@ async def v2t_all_output_files() -> str:
 # 轮询辅助
 # ---------------------------------------------------------------------------
 
-async def _poll_job(job_id: str, expect_translation: bool = False,
-                    max_wait: float = 600, interval: float = 2.0) -> str:
+async def _poll_job(
+    ctx: Context,
+    job_id: str,
+    expect_translation: bool = False,
+    max_wait: float = 600,
+    interval: float = 2.0,
+) -> str:
     """轮询任务直到完成，返回结果文本。"""
     elapsed = 0.0
     last_status = ""
@@ -831,7 +925,7 @@ async def _poll_job(job_id: str, expect_translation: bool = False,
         elapsed += interval
 
         try:
-            job = await _get(f"/api/jobs/{job_id}")
+            job = await _get(ctx, f"/api/jobs/{job_id}")
         except Exception:
             continue
 
@@ -846,7 +940,6 @@ async def _poll_job(job_id: str, expect_translation: bool = False,
             return f"❌ 任务失败: {status}"
 
         if done:
-            # 读取输出文件
             current_job = job.get("current_job", "")
             prefix = job.get("current_prefix", "")
 
@@ -854,18 +947,19 @@ async def _poll_job(job_id: str, expect_translation: bool = False,
 
             if current_job:
                 try:
-                    files_resp = await _get(f"/api/jobs/{job_id}/files")
+                    files_resp = await _get(ctx, f"/api/jobs/{job_id}/files")
                     files = files_resp.get("files", [])
-                    result["files"] = [f["name"] for f in files]
+                    result["files"] = files
                 except Exception:
-                    pass
+                    files = []
 
-                # 读取 SRT 内容
+                # 读取 SRT 内容（通过 API）
                 srt_name = f"{prefix}.srt" if prefix else None
-                if srt_name:
+                if srt_name and srt_name in files:
                     try:
-                        srt_content = await _get_file_content(current_job, srt_name)
-                        result["srt_content"] = srt_content
+                        result["srt_content"] = await _read_text_from_api(
+                            ctx, f"/api/jobs/{job_id}/download-file", {"file_name": srt_name}
+                        )
                     except Exception:
                         pass
 
@@ -873,15 +967,15 @@ async def _poll_job(job_id: str, expect_translation: bool = False,
                 if expect_translation:
                     for lang in ["zh", "en", "ja", "ko"]:
                         translated_name = f"{prefix}.{lang}.srt" if prefix else None
-                        if translated_name:
+                        if translated_name and translated_name in files:
                             try:
-                                content = await _get_file_content(current_job, translated_name)
-                                result[f"{lang}_srt_content"] = content
-                                break
+                                result[f"{lang}_srt_content"] = await _read_text_from_api(
+                                    ctx, f"/api/jobs/{job_id}/download-file", {"file_name": translated_name}
+                                )
                             except Exception:
                                 pass
 
-            return json.dumps(result, ensure_ascii=False, indent=2)
+            return _fmt_json(result)
 
     return f"⏰ 任务超时（{max_wait}s），最后状态: {last_status}"
 
