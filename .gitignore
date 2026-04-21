@@ -24,3 +24,8 @@ workspace/
 video2text.pem
 video2text-key.pem
 certs/
+
+# Runtime logs
+nohup.out
+logs/*.out
+logs/service.log
