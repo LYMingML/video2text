@@ -1,6 +1,6 @@
 # video2text 项目架构文档
 
-> **版本**: v0.4.2 | **语言**: Python 3.10+ | **许可**: MIT
+> **版本**: v0.5.0 | **语言**: Python 3.10+ | **许可**: MIT
 
 ---
 
@@ -184,11 +184,11 @@ PipelineTask
     ▼
 [Stage 2] Extract Worker
     │ queue.Queue[PipelineTask]
-    │ 职责：ffmpeg 提取 WAV（按后端要求设置采样率）
+    │ 职责：ffmpeg 提取 WAV + 音频分片（split_audio_chunks）
     ▼
 [Stage 3] Transcribe Worker
     │ queue.Queue[PipelineTask]
-    │ 职责：加载 ASR 后端、分片转录、保存原文 SRT/TXT
+    │ 职责：加载 ASR 后端、GPU 转录（使用预分片结果）、保存原文 SRT/TXT
     ▼
 [Stage 4] Translate Worker
     │ queue.Queue[PipelineTask]
@@ -342,6 +342,11 @@ class PipelineTask:
     model_name: str = ""
     language: str = "auto"
     device: str = "auto"
+    # 预处理结果
+    duration: float = 0.0
+    chunk_items: list[tuple[str, float, float]] = []
+    chunk_seconds: int = 0
+    overlap_seconds: int = 0
     # 转录结果
     segments: list[tuple[float, float, str]] = field(default_factory=list)
     # 翻译配置
@@ -364,13 +369,15 @@ class PipelineTask:
 **全局单例**：`get_pipeline() → Pipeline`，懒初始化，线程安全。
 
 **阶段进度分配**：
-- Stage 1（下载）：0 ~ 5%
-- Stage 2（WAV 提取）：5%
+- Stage 1（下载）：0 ~ 2%
+- Stage 2（预处理）：2% ~ 10%
+  - WAV 提取：2% ~ 5%
+  - 音频分片：5% ~ 10%
 - Stage 3（ASR 转录）：10% ~ 90%
   - 后端加载：10%
-  - 分片转录：10% ~ 85%（按实际进度）
+  - GPU 转录：10% ~ 85%（按实际进度）
   - 保存原文：85% ~ 90%
-- Stage 4（翻译）：92% ~ 99%
+- Stage 4（翻译）：90% ~ 100%
   - 翻译中：按段数实时更新
   - 完成后：100%
 

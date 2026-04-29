@@ -56,6 +56,8 @@ def do_transcribe(
     job_dir: Path,
     log_cb: Callable[[str], None] | None = None,
     progress_cb: Callable[[float, str], None] | None = None,
+    pre_chunked_items: list[tuple[str, float, float]] | None = None,
+    pre_duration: float | None = None,
 ) -> list[tuple[float, float, str]]:
     """
     提取音频并分片转录，使用注册表中的 ASR 后端。
@@ -70,6 +72,8 @@ def do_transcribe(
         job_dir: job 工作目录
         log_cb: 日志回调
         progress_cb: 进度回调 (ratio, message)
+        pre_chunked_items: 预处理阶段已完成的分片列表，传入后跳过提取/分片
+        pre_duration: 预处理阶段已获取的音频时长
 
     Returns:
         [(start, end, text), ...] 时间戳片段列表
@@ -77,91 +81,120 @@ def do_transcribe(
     from backends import get_asr_backend
 
     lang_code = _parse_lang_code(language)
-    audio_path = str(job_dir / f"{file_prefix}.wav")
 
-    # 1. 提取音频
-    input_media = Path(video_path)
-    target_audio = Path(audio_path)
-
-    reuse_existing_wav = False
-    try:
-        reuse_existing_wav = (
-            input_media.suffix.lower() == ".wav"
-            and input_media.exists()
-            and input_media.resolve() == target_audio.resolve()
-        )
-    except OSError:
-        reuse_existing_wav = input_media.suffix.lower() == ".wav" and str(input_media) == str(target_audio)
-
-    if reuse_existing_wav:
+    # ── 快速路径：已有预处理结果，直接进入转录 ──
+    if pre_chunked_items is not None and pre_duration is not None:
+        asr = get_asr_backend(backend_cls_name)
         if log_cb:
-            log_cb("[STEP] 输入已是当前任务的 WAV 文件，直接复用...")
+            log_cb(f"[ASR] 后端: {asr.name}, 模型: {model_name or asr.default_model}")
+
+        actual_device = device
+        if actual_device == "CUDA" and not _has_nvidia_gpu():
+            if log_cb:
+                log_cb("[DEVICE] 未检测到可用 NVIDIA GPU，强制回退 CPU")
+            actual_device = "CPU"
+
+        effective_model = model_name or asr.default_model
+        effective_device = actual_device.lower()
+        if effective_device == "cuda":
+            effective_device = "cuda:0"
+
+        if log_cb:
+            log_cb(
+                f"[ASR] 实际配置: backend={asr.name} model={effective_model} "
+                f"device={effective_device} language={lang_code}"
+            )
+
+        chunk_seconds = asr.default_chunk_seconds
+        overlap_seconds = asr.default_overlap_seconds
+        duration = pre_duration
+        chunk_items = pre_chunked_items
     else:
+        # ── 完整路径：提取音频 + 分片 ──
+        audio_path = str(job_dir / f"{file_prefix}.wav")
+
+        # 1. 提取音频
+        input_media = Path(video_path)
+        target_audio = Path(audio_path)
+
+        reuse_existing_wav = False
+        try:
+            reuse_existing_wav = (
+                input_media.suffix.lower() == ".wav"
+                and input_media.exists()
+                and input_media.resolve() == target_audio.resolve()
+            )
+        except OSError:
+            reuse_existing_wav = input_media.suffix.lower() == ".wav" and str(input_media) == str(target_audio)
+
+        if reuse_existing_wav:
+            if log_cb:
+                log_cb("[STEP] 输入已是当前任务的 WAV 文件，直接复用...")
+        else:
+            if log_cb:
+                log_cb("[STEP] 正在使用 ffmpeg 提取 WAV 文件...")
+            if progress_cb:
+                progress_cb(0.0, "提取 WAV 文件...")
+            extract_audio(video_path, audio_path)
+            _schedule_video_deletion(video_path, delay_seconds=60)
+
+        staged_source_path = _stage_source_media_to_temp_video(video_path)
+        if log_cb and Path(staged_source_path).suffix.lower() in _SOURCE_MEDIA_EXTS:
+            log_cb(f"[MEDIA] 原始媒体已归档: {Path(staged_source_path).name}")
+        _cleanup_job_source_media(job_dir)
+
+        # 2. 读取时长
         if log_cb:
-            log_cb("[STEP] 正在使用 ffmpeg 提取 WAV 文件...")
-        if progress_cb:
-            progress_cb(0.0, "提取 WAV 文件...")
-        extract_audio(video_path, audio_path)
-        _schedule_video_deletion(video_path, delay_seconds=60)
-
-    staged_source_path = _stage_source_media_to_temp_video(video_path)
-    if log_cb and Path(staged_source_path).suffix.lower() in _SOURCE_MEDIA_EXTS:
-        log_cb(f"[MEDIA] 原始媒体已归档: {Path(staged_source_path).name}")
-    _cleanup_job_source_media(job_dir)
-
-    # 2. 读取时长
-    if log_cb:
-        log_cb("[STEP] 正在读取音频时长...")
-    duration = get_audio_duration(audio_path)
-    if log_cb:
-        log_cb(f"[AUDIO] 时长: {duration:.1f}s")
-
-    # 3. 加载后端
-    asr = get_asr_backend(backend_cls_name)
-    if log_cb:
-        log_cb(f"[ASR] 后端: {asr.name}, 模型: {model_name or asr.default_model}")
-
-    chunk_seconds = asr.default_chunk_seconds
-    overlap_seconds = asr.default_overlap_seconds
-
-    # 4. 获取实际设备
-    actual_device = device
-    if actual_device == "CUDA" and not _has_nvidia_gpu():
+            log_cb("[STEP] 正在读取音频时长...")
+        duration = get_audio_duration(audio_path)
         if log_cb:
-            log_cb("[DEVICE] 未检测到可用 NVIDIA GPU，强制回退 CPU")
-        actual_device = "CPU"
+            log_cb(f"[AUDIO] 时长: {duration:.1f}s")
 
-    effective_model = model_name or asr.default_model
-    effective_device = actual_device.lower()
-    if effective_device == "cuda":
-        effective_device = "cuda:0"
-
-    if log_cb:
-        log_cb(
-            f"[ASR] 实际配置: backend={asr.name} model={effective_model} "
-            f"device={effective_device} language={lang_code}"
-        )
-
-    # 5. 分片音频（仅对非 VibeVoice 后端，VibeVoice 自带切片逻辑）
-    chunk_dir = job_dir / "chunks"
-
-    if chunk_seconds > 0 and duration > chunk_seconds:
-        # 后端需要外部切分
+        # 3. 加载后端
+        asr = get_asr_backend(backend_cls_name)
         if log_cb:
-            log_cb(f"[STEP] 正在按 {chunk_seconds}s 分片音频（重叠 {overlap_seconds}s）...")
-        if progress_cb:
-            progress_cb(0.05, f"分片音频（每段 {chunk_seconds}s）...")
+            log_cb(f"[ASR] 后端: {asr.name}, 模型: {model_name or asr.default_model}")
 
-        chunk_items = split_audio_chunks(
-            audio_path,
-            str(chunk_dir),
-            chunk_seconds=chunk_seconds,
-            overlap_seconds=overlap_seconds,
-        )
-    else:
+        chunk_seconds = asr.default_chunk_seconds
+        overlap_seconds = asr.default_overlap_seconds
+
+        # 4. 获取实际设备
+        actual_device = device
+        if actual_device == "CUDA" and not _has_nvidia_gpu():
+            if log_cb:
+                log_cb("[DEVICE] 未检测到可用 NVIDIA GPU，强制回退 CPU")
+            actual_device = "CPU"
+
+        effective_model = model_name or asr.default_model
+        effective_device = actual_device.lower()
+        if effective_device == "cuda":
+            effective_device = "cuda:0"
+
         if log_cb:
-            log_cb("[CHUNK] 音频较短或后端自带切片，直接转写整段")
-        chunk_items = [(audio_path, 0.0, duration)]
+            log_cb(
+                f"[ASR] 实际配置: backend={asr.name} model={effective_model} "
+                f"device={effective_device} language={lang_code}"
+            )
+
+        # 5. 分片音频
+        chunk_dir = job_dir / "chunks"
+
+        if chunk_seconds > 0 and duration > chunk_seconds:
+            if log_cb:
+                log_cb(f"[STEP] 正在按 {chunk_seconds}s 分片音频（重叠 {overlap_seconds}s）...")
+            if progress_cb:
+                progress_cb(0.05, f"分片音频（每段 {chunk_seconds}s）...")
+
+            chunk_items = split_audio_chunks(
+                audio_path,
+                str(chunk_dir),
+                chunk_seconds=chunk_seconds,
+                overlap_seconds=overlap_seconds,
+            )
+        else:
+            if log_cb:
+                log_cb("[CHUNK] 音频较短或后端自带切片，直接转写整段")
+            chunk_items = [(audio_path, 0.0, duration)]
 
     if not chunk_items:
         return []

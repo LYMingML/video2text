@@ -4,17 +4,19 @@ Video/audio to subtitle tool with triple ASR backends (VibeVoice, FunASR, faster
 
 **[中文文档](docs/README_zh.md)**
 
-**Version**: v0.4.4
+**Version**: v0.5.0
 
 ## Features
 
 - **Triple ASR Backends**: VibeVoice ASR (7B/9B, speaker diarization, default) / FunASR (Paraformer, best for Chinese) / faster-whisper (multilingual)
 - **Pluggable Architecture**: Abstract base classes + registry pattern, easy to add new ASR/translate backends
+- **4-Stage Pipeline**: Download → Preprocess (WAV extract + audio chunking) → ASR Transcribe (GPU) → Translate — stages run in parallel for throughput
 - **Tesla P4 / Pascal GPU Support**: PyTorch 2.3.1 compatibility patches for 4-bit/8-bit quantized VibeVoice models (~6GB VRAM)
 - **URL Download**: yt-dlp for YouTube, Bilibili, etc.; XHS-Downloader for watermark-free Xiaohongshu videos
 - **Auto Subtitle Import**: Platform-provided subtitles are imported first, skipping ASR when available
 - **AI Translation**: OpenAI-compatible API for subtitle translation (SiliconFlow, DeepSeek, etc.)
 - **GPU Acceleration**: NVIDIA GPU (Pascal+), Intel GPU (FunASR only)
+- **UI Preferences Persistence**: Auto-translate, auto-download, backend selection, language/device preferences saved to `.env` and restored on page load
 - **WSL2 Auto-Detection**: Automatically reads Windows Firefox cookies on WSL2 for authenticated downloads
 - **Proxy Support**: Configurable HTTP proxy for yt-dlp (YouTube, etc.)
 - **External API**: Unified `/api/external/process` endpoint for third-party integration
@@ -165,6 +167,24 @@ echo "PREFER_INTEL_GPU=1" >> .env
 ```
 
 ## Changelog
+
+### v0.5.0
+- feat: 4-stage pipeline integrated into FastAPI — Download → Preprocess (WAV + chunking) → ASR (GPU) → Translate
+- feat: Queue page shows 4 columns with real-time stage progress and specific step descriptions
+- feat: Audio chunking moved to preprocessing stage, transcription stage only does GPU work
+- feat: Auto-translate handled by backend pipeline (no frontend JS triggers needed)
+- feat: Auto-download ZIP to browser default path without confirmation dialog
+- feat: UI preferences (auto-translate, auto-download, backend, language, device) persisted to `.env`, restored on page load
+- fix: Workspace path resolution — `src/workspace` symlinked to shared workspace directory
+- fix: faster-whisper GPU — normalize `cuda:0` → `cuda` for compatibility
+- fix: Backend display name mapping with prefix matching
+
+### v0.4.4
+- feat: File structure reorganization, path optimization, startup script fixes
+- fix: MCP server parameter names, file reading, translate polling
+
+### v0.4.3
+- fix: Remove Gradio dependency, cleanup redundant code
 
 ### v0.4.2
 - fix: auto-translate/auto-download flags lost after page refresh — restore from server-side `auto_translate`/`auto_download` fields

@@ -177,21 +177,16 @@ SUBTITLE_PRIORITY_PRESETS: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 def _display_name_to_asr_cls(display_name: str) -> str:
-    """将前端显示名（如 'FunASR（Paraformer）'）映射为后端类名（如 'FunASRASR'）。"""
+    """将前端显示名映射为后端类名。支持精确匹配和前缀匹配。"""
     try:
         from backends import list_asr_backends, get_asr_backend
         for cls_name in list_asr_backends():
-            if get_asr_backend(cls_name).name == display_name:
+            backend_name = get_asr_backend(cls_name).name
+            if backend_name == display_name or display_name.startswith(backend_name):
                 return cls_name
     except Exception:
         pass
-    # fallback: 常用映射
-    _FALLBACK = {
-        "FunASR（Paraformer）": "FunASRASR",
-        "faster-whisper（多语言）": "WhisperASR",
-        "VibeVoice ASR": "VibeVoiceASR",
-    }
-    return _FALLBACK.get(display_name, display_name)
+    return display_name
 
 
 # ---------------------------------------------------------------------------
@@ -199,11 +194,9 @@ def _display_name_to_asr_cls(display_name: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _pipeline_stage_from_ratio(ratio: float) -> str:
-    if ratio <= 0:
+    if ratio <= 0.02:
         return "下载/上传"
     if ratio < 0.1:
-        return "下载/上传"
-    if ratio < 0.2:
         return "预处理"
     if ratio < 0.9:
         return "转录中"
@@ -222,12 +215,12 @@ def _on_pipeline_status(task_id: str, msg: str):
         elif msg == "完成" or msg == "全部完成":
             job.running = False
             job.done = True
-            job.zip_bundle = str(core.WORKSPACE_DIR / job.current_job / f"{job.current_prefix}.zip") if job.current_job else ""
-            try:
-                from utils.subtitle import normalize_segments_timeline, save_srt, save_plain
-                from core.workspace import _build_all_bundle
-            except Exception:
-                pass
+            if job.current_job and job.current_prefix:
+                try:
+                    job_dir = core.WORKSPACE_DIR / job.current_job
+                    job.zip_bundle = _build_all_bundle(job_dir, job.current_prefix)
+                except Exception:
+                    job.zip_bundle = str(core.WORKSPACE_DIR / job.current_job / f"{job.current_prefix}.zip")
         elif msg.startswith("失败"):
             job.running = False
             job.failed = True
@@ -236,8 +229,20 @@ def _on_pipeline_status(task_id: str, msg: str):
 
 def _on_pipeline_log(task_id: str, line: str):
     job = _ALL_JOBS.get(task_id)
-    if job:
-        job.add_log(line)
+    if not job:
+        return
+    job.add_log(line)
+    # 从 Pipeline 日志提取 job_dir 和 file_prefix
+    with _RUNTIME_LOCK:
+        if line.startswith("[JOB] "):
+            job_name = line.replace("[JOB] workspace/", "").strip()
+            if job_name:
+                job.current_job = job_name
+        if line.startswith("[INPUT] ") and not job.current_prefix:
+            fname = line.replace("[INPUT] ", "").strip()
+            if fname:
+                from pathlib import Path as _P
+                job.current_prefix = _P(fname).stem
 
 
 def _on_pipeline_progress(task_id: str, ratio: float, msg: str):
@@ -246,21 +251,7 @@ def _on_pipeline_progress(task_id: str, ratio: float, msg: str):
     if not job:
         return
     pct = max(0, min(100, int(ratio * 100)))
-    step = _pipeline_stage_from_ratio(ratio)
-    _set_job_progress(job, msg, time.time(), progress_pct=pct, step_label=step)
-
-    # 更新 job_dir / prefix 信息（首次进入预处理时设置）
-    if not job.current_job and ratio > 0:
-        try:
-            from core.pipeline import get_pipeline
-            # 扫描 workspace 查找最新目录
-            for d in sorted(core.WORKSPACE_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
-                if d.is_dir() and d.name != "temp_video":
-                    job.current_job = d.name
-                    job.current_prefix = d.stem if d.stem else job.current_job
-                    break
-        except Exception:
-            pass
+    _set_job_progress(job, msg, time.time(), progress_pct=pct, step_label=msg)
 
 
 
@@ -453,13 +444,13 @@ def _get_queue_status() -> dict:
                 done_jobs.append(j)
                 continue
             if j.get("running"):
-                step = j.get("step_label", "")
-                if step == "翻译" or (step and "翻译" in step):
+                pct = j.get("progress_pct", 0)
+                if pct >= 90:
                     translate_jobs.append(j)
-                elif step == "预处理":
-                    extract_jobs.append(j)
-                elif step == "转录中" or step == "识别完成":
+                elif pct >= 10:
                     transcribe_jobs.append(j)
+                elif pct >= 2:
+                    extract_jobs.append(j)
                 else:
                     download_jobs.append(j)
             else:
@@ -467,12 +458,17 @@ def _get_queue_status() -> dict:
 
         # Pipeline 队列深度
         p = get_pipeline()
+        queue_depths = {}
+        for name, q in [("download", p._download_queue), ("extract", p._extract_queue),
+                        ("transcribe", p._transcribe_queue), ("translate", p._translate_queue)]:
+            queue_depths[name] = q.qsize()
+
         return {
             "stages": {
-                "download": {"jobs": download_jobs, "label": "下载/上传"},
-                "extract": {"jobs": extract_jobs, "label": "预处理"},
-                "transcribe": {"jobs": transcribe_jobs, "label": "转录"},
-                "translate": {"jobs": translate_jobs, "label": "翻译"},
+                "download": {"jobs": download_jobs, "label": "下载/上传", "queue_depth": queue_depths["download"]},
+                "extract": {"jobs": extract_jobs, "label": "预处理", "queue_depth": queue_depths["extract"]},
+                "transcribe": {"jobs": transcribe_jobs, "label": "转录", "queue_depth": queue_depths["transcribe"]},
+                "translate": {"jobs": translate_jobs, "label": "翻译", "queue_depth": queue_depths["translate"]},
             },
             "done_jobs": done_jobs,
             "all_jobs": all_json,
@@ -1451,15 +1447,15 @@ button:hover{transform:translateY(-1px);background:#ecfaf4}
                             <button onclick="startTranslate()">翻译</button>
                             <button onclick="downloadOutputZip()">下载输出文件</button>
                             <label class="inline-toggle" title="转录完成后自动翻译">
-                                <input type="checkbox" id="autoTranslate" />
+                                <input type="checkbox" id="autoTranslate" onchange="saveUiPreferences()" />
                                 <span>自动翻译</span>
                             </label>
                             <label class="inline-toggle" title="完成后自动下载 ZIP">
-                                <input type="checkbox" id="autoDownload" />
+                                <input type="checkbox" id="autoDownload" onchange="saveUiPreferences()" />
                                 <span>自动下载</span>
                             </label>
                             <label class="inline-toggle" title="自动保存到浏览器默认下载路径（无需弹窗确认）">
-                                <input type="checkbox" id="directSave" />
+                                <input type="checkbox" id="directSave" onchange="saveUiPreferences()" />
                                 <span>直接保存</span>
                             </label>
                             <span class="action-spacer"></span>
@@ -1491,7 +1487,7 @@ button:hover{transform:translateY(-1px);background:#ecfaf4}
                     <div class="drag-row">
                         <div class="drag-item field" draggable="true">
                             <label for="homeBackendSel">识别后端</label>
-                            <select id="homeBackendSel" onchange="onHomeBackendChange()">
+                            <select id="homeBackendSel" onchange="onHomeBackendChange(); saveUiPreferences()">
                                 <option>VibeVoice ASR（长音频+说话人分离）</option>
                                 <option>FunASR（Paraformer）</option>
                                 <option>faster-whisper（多语言）</option>
@@ -1515,7 +1511,7 @@ button:hover{transform:translateY(-1px);background:#ecfaf4}
                         <div class="drag-item field" draggable="true">
                             <label for="homeBackendModelSel">后端模型（含特性）</label>
                             <input id="homeBackendModelSearch" placeholder="筛选后端模型" oninput="filterBackendModels()" />
-                            <select id="homeBackendModelSel" class="backend-model-select"></select>
+                            <select id="homeBackendModelSel" class="backend-model-select" onchange="saveUiPreferences()"></select>
                         </div>
                     </div>
                     <div class="drag-row">
@@ -1677,7 +1673,7 @@ button:hover{transform:translateY(-1px);background:#ecfaf4}
                     </div>
                     <div class="field compact">
                         <label for="langSel">语言</label>
-                        <select id="langSel">
+                        <select id="langSel" onchange="saveUiPreferences()">
                             <option>自动检测</option>
                             <option>zh（普通话）</option>
                             <option>yue（粤语）</option>
@@ -1689,7 +1685,7 @@ button:hover{transform:translateY(-1px);background:#ecfaf4}
                     </div>
                     <div class="field compact">
                         <label for="deviceSel">推理设备</label>
-                        <select id="deviceSel">
+                        <select id="deviceSel" onchange="saveUiPreferences()">
                             <option>CUDA</option>
                             <option>CPU</option>
                         </select>
@@ -3021,28 +3017,40 @@ function renderQueueStatus(data){
     const countEl = document.getElementById(countMap[key]);
     const stage = stages[key] || {};
     const jobs = stage.jobs || [];
+    const depth = stage.queue_depth || 0;
     if(countEl) countEl.textContent = '(' + jobs.length + ')';
     if(!container) continue;
     if(jobs.length === 0){
       container.innerHTML = '<div style="padding:8px;text-align:center;font-size:11px;color:#aaa">暂无</div>';
     }else{
       let html = '';
+      let activeIdx = -1;
+      jobs.forEach((j, i) => { if(j.running && activeIdx < 0) activeIdx = i; });
       jobs.forEach((job, idx) => {
-        const fileName = job.display_name || job.current_job || '未知文件';
-        const step = job.step_label || '等待中';
+        const fileName = (job.display_name || job.current_job || '未知文件');
+        const shortName = fileName.length > 25 ? fileName.substring(0,25)+'...' : fileName;
         const pct = job.progress_pct || 0;
         const isActive = job.running;
+        let stepText = '';
+        if(isActive){
+          stepText = pct > 0 ? (job.step_label||'处理中')+' '+pct+'%' : (job.step_label||'处理中');
+        } else if(activeIdx >= 0){
+          const waitPos = idx > activeIdx ? idx - activeIdx : idx + 1;
+          stepText = '排队 #'+waitPos+' — 等待'+(stage.label||'')+'完成';
+        } else {
+          stepText = '等待处理';
+        }
         const border = isActive ? 'border:1px solid #2abfa6;background:#f0faf7;' : 'border-bottom:1px solid #eee;';
-        html += '<div style="padding:6px 4px;' + border + 'border-radius:4px;margin-bottom:3px">' +
+        html += '<div style="padding:6px 4px;'+border+'border-radius:4px;margin-bottom:3px">' +
           '<div style="display:flex;justify-content:space-between;align-items:center">' +
-          '<span style="font-size:12px;font-weight:' + (isActive ? '600' : '400') + ';overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:70%">' + fileName + '</span>' +
-          (isActive ? '<span style="font-size:10px;color:#2abfa6">●</span>' : '<span style="font-size:10px;color:#aaa">#' + (idx + 1) + '</span>') +
+          '<span style="font-size:12px;font-weight:'+(isActive?'600':'400')+';overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60%">'+shortName+'</span>' +
+          (isActive ? '<span style="font-size:10px;color:#2abfa6">● 运行中</span>' : '<span style="font-size:10px;color:#aaa">#'+(idx+1)+'</span>') +
           '</div>';
         if(isActive && pct > 0){
           html += '<div style="margin:3px 0"><div style="height:4px;background:#e0e0e0;border-radius:2px;overflow:hidden">' +
-            '<div style="height:100%;width:' + pct + '%;background:#2abfa6"></div></div></div>';
+            '<div style="height:100%;width:'+pct+'%;background:#2abfa6"></div></div></div>';
         }
-        html += '<div style="font-size:10px;color:' + (isActive ? '#2abfa6' : '#888') + '">' + step + '</div></div>';
+        html += '<div style="font-size:10px;color:'+(isActive?'#2abfa6':'#999')+'">'+stepText+'</div></div>';
       });
       container.innerHTML = html;
     }
@@ -3257,6 +3265,11 @@ function applyAppSettings(settings){
                 funasrModel: settings?.DEFAULT_FUNASR_MODEL || settings?.funasrModel || APP_DEFAULTS.funasrModel,
                 whisperModel: settings?.DEFAULT_WHISPER_MODEL || settings?.whisperModel || APP_DEFAULTS.whisperModel,
         autoSubtitleLang: normalizeSubtitlePriority(settings?.AUTO_SUBTITLE_LANG || settings?.autoSubtitleLang || settings?.AUTO_SUBTITLE_LANGS || settings?.autoSubtitleLangs || APP_DEFAULTS.autoSubtitleLang),
+        language: settings?.DEFAULT_LANGUAGE || settings?.language || '自动检测',
+        device: settings?.DEFAULT_DEVICE || settings?.device || 'CUDA',
+        autoTranslate: settings?.AUTO_TRANSLATE === '1',
+        autoDownload: settings?.AUTO_DOWNLOAD === '1',
+        directSave: settings?.DIRECT_SAVE !== '0',
         };
         const backendSel = document.getElementById('backendSel');
         const homeBackendSel = document.getElementById('homeBackendSel');
@@ -3270,9 +3283,35 @@ function applyAppSettings(settings){
         if(autoSubtitleLangs){
             const hasValue = Array.from(autoSubtitleLangs.options).some(opt => opt.value === merged.autoSubtitleLang);
             autoSubtitleLangs.value = hasValue ? merged.autoSubtitleLang : APP_DEFAULTS.autoSubtitleLang;
-            lastSavedAutoSubtitleLang = autoSubtitleLangs.value;
         }
-        onHomeBackendChange(merged.backend === 'faster-whisper（多语言）' ? merged.whisperModel : merged.funasrModel);
+    const langSel = document.getElementById('langSel');
+    if(langSel) langSel.value = merged.language;
+    const deviceSel = document.getElementById('deviceSel');
+    if(deviceSel) deviceSel.value = merged.device;
+    const autoTranslateCb = document.getElementById('autoTranslate');
+    if(autoTranslateCb) autoTranslateCb.checked = merged.autoTranslate;
+    const autoDownloadCb = document.getElementById('autoDownload');
+    if(autoDownloadCb) autoDownloadCb.checked = merged.autoDownload;
+    const directSaveCb = document.getElementById('directSave');
+    if(directSaveCb) directSaveCb.checked = merged.directSave;
+    lastSavedAutoSubtitleLang = autoSubtitleLangs ? autoSubtitleLangs.value : '';
+    onHomeBackendChange(merged.backend === 'faster-whisper（多语言）' ? merged.whisperModel : merged.funasrModel);
+}
+
+function saveUiPreferences(){
+    const backend = document.getElementById('homeBackendSel')?.value || '';
+    const funasrModel = document.getElementById('funasrModel')?.value || '';
+    const whisperModel = document.getElementById('whisperModel')?.value || '';
+    const language = document.getElementById('langSel')?.value || '自动检测';
+    const device = document.getElementById('deviceSel')?.value || 'CUDA';
+    const autoTranslate = document.getElementById('autoTranslate')?.checked ? '1' : '0';
+    const autoDownload = document.getElementById('autoDownload')?.checked ? '1' : '0';
+    const directSave = document.getElementById('directSave')?.checked ? '1' : '0';
+    api('/api/app-settings/ui-preferences', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({backend, funasr_model:funasrModel, whisper_model:whisperModel, language, device, auto_translate:autoTranslate, auto_download:autoDownload, direct_save:directSave})
+    }).catch(()=>{});
 }
 
 function fillProfile(p){
@@ -3368,7 +3407,7 @@ function backendFormData(fd){
   fd.append('device', document.getElementById('deviceSel').value || 'CUDA');
 }
 
-async function downloadOutputZip(){
+async function downloadOutputZip(forceBlob){
     if(!currentJobId){
         alert('请先开始并完成任务');
         return;
@@ -3386,7 +3425,7 @@ async function downloadOutputZip(){
         return;
     }
     const url = '/api/jobs/'+currentJobId+'/download-file?file_name='+encodeURIComponent(zipName);
-    if(document.getElementById('directSave')?.checked){
+    if(forceBlob || document.getElementById('directSave')?.checked){
         // fetch+blob 方式：可靠地保存到浏览器默认下载路径（不受用户手势限制）
         const resp = await fetch(url);
         if(!resp.ok) throw new Error('下载失败: '+resp.status);
@@ -3615,10 +3654,9 @@ async function handleJobUpdate(data){
         if(pendingAutoFlags.download && !data.failed){
           pendingAutoFlags.download = false;
           _stopPoll();
-          try{ await downloadOutputZip(); }catch(e){ console.error('自动下载失败', e); }
+          try{ await downloadOutputZip(true); }catch(e){ console.error('自动下载失败', e); }
         } else {
           _stopPoll();
-        }
         }
     }
 }
@@ -4210,6 +4248,29 @@ def api_save_subtitle_priority(payload: dict[str, str]):
     value = _normalize_subtitle_priority(str(payload.get("auto_subtitle_lang", "")).strip() or "zh")
     save_app_settings({"AUTO_SUBTITLE_LANG": value})
     return {"message": "ok", "AUTO_SUBTITLE_LANG": value}
+
+
+@app.post("/api/app-settings/ui-preferences")
+def api_save_ui_preferences(payload: dict[str, str]):
+    """保存主页 UI 偏好（后端、模型、语言、设备、复选框状态）到 .env"""
+    mapping = {
+        "backend": "DEFAULT_BACKEND",
+        "funasr_model": "DEFAULT_FUNASR_MODEL",
+        "whisper_model": "DEFAULT_WHISPER_MODEL",
+        "language": "DEFAULT_LANGUAGE",
+        "device": "DEFAULT_DEVICE",
+        "auto_translate": "AUTO_TRANSLATE",
+        "auto_download": "AUTO_DOWNLOAD",
+        "direct_save": "DIRECT_SAVE",
+    }
+    updates = {}
+    for js_key, env_key in mapping.items():
+        if js_key in payload:
+            val = str(payload[js_key]).strip()
+            updates[env_key] = val
+    if updates:
+        save_app_settings(updates)
+    return {"message": "ok"}
 
 
 @app.post("/api/model/profiles/delete")

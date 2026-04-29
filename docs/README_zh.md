@@ -4,17 +4,19 @@
 
 **[English Documentation](../README.md)**
 
-**版本**: v0.4.2
+**版本**: v0.5.0
 
 ## 功能特性
 
 - **三大 ASR 后端**：VibeVoice ASR（7B/9B，说话人分离，默认）/ FunASR（Paraformer，中文最佳）/ faster-whisper（多语言）
 - **插件化架构**：抽象基类 + 注册表模式，轻松添加新 ASR/翻译后端
+- **四阶段流水线**：下载 → 预处理（WAV 提取 + 音频分片）→ ASR 转录（GPU）→ 翻译，阶段间并行提升吞吐
 - **Tesla P4 / Pascal GPU 支持**：PyTorch 2.3.1 兼容补丁，支持 4-bit/8-bit 量化 VibeVoice 模型（~6GB 显存）
 - **URL 下载**：yt-dlp 支持 YouTube、Bilibili 等；XHS-Downloader 支持小红书无水印视频
 - **自动字幕导入**：优先使用平台提供的字幕，跳过语音识别
 - **AI 翻译**：通过 OpenAI 兼容 API 翻译字幕（SiliconFlow、DeepSeek 等）
 - **GPU 加速**：NVIDIA GPU（Pascal+）、Intel GPU（仅 FunASR）
+- **UI 偏好持久化**：自动翻译、自动下载、后端选择、语言/设备偏好保存到 `.env`，刷新页面自动恢复
 - **WSL2 自动检测**：自动读取 Windows Firefox Cookie 实现认证下载
 - **代理支持**：可配置 HTTP 代理（yt-dlp，用于 YouTube 等）
 - **外部 API**：统一的 `/api/external/process` 端点供第三方集成
@@ -166,6 +168,24 @@ echo "PREFER_INTEL_GPU=1" >> .env
 ```
 
 ## 更新日志
+
+### v0.5.0
+- feat: 四阶段流水线集成到 FastAPI — 下载 → 预处理（WAV + 分片）→ ASR（GPU）→ 翻译
+- feat: 队列页 4 列显示，实时阶段进度和具体步骤描述
+- feat: 音频分片移到预处理阶段，转录阶段仅做 GPU 计算
+- feat: 自动翻译由后端流水线处理（无需前端 JS 触发）
+- feat: 自动下载 ZIP 到浏览器默认路径，无需确认弹窗
+- feat: UI 偏好（自动翻译、自动下载、后端、语言、设备）持久化到 `.env`，刷新页面自动恢复
+- fix: workspace 路径解析 — `src/workspace` 符号链接到共享 workspace 目录
+- fix: faster-whisper GPU — `cuda:0` 规范化为 `cuda` 以兼容
+- fix: 后端显示名称映射使用前缀匹配
+
+### v0.4.4
+- feat: 文件结构重组，路径优化，启动脚本修复
+- fix: MCP server 参数名、文件读取、翻译轮询
+
+### v0.4.3
+- fix: 移除 Gradio 依赖，清理冗余代码
 
 ### v0.4.2
 - fix: 修复页面刷新后自动翻译/自动下载标志丢失 — 从服务端 `auto_translate`/`auto_download` 字段恢复

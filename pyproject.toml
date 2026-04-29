@@ -1,6 +1,6 @@
 [project]
 name = "video2text"
-version = "0.4.4"
+version = "0.5.0"
 description = "视频转文本字幕工具，插件化 ASR/翻译后端，四阶段流水线，NVIDIA GPU 加速"
 readme = "README.md"
 requires-python = ">=3.10"

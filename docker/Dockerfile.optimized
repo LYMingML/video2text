@@ -1,4 +1,4 @@
-# video2text GPU Dockerfile - Optimized Version
+# video2text GPU Dockerfile - Optimized Version (v0.5.0)
 # 目标：减少镜像体积同时保持 GPU 加速
 # 优化策略：
 # 1. 使用 NVIDIA CUDA 基础镜像（预装 CUDA，更精简）

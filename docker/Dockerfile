@@ -1,4 +1,4 @@
-# video2text GPU Dockerfile - Ultra Optimized v0.2.3
+# video2text GPU Dockerfile - v0.5.0
 # 基于 PyTorch 官方 runtime 镜像，单阶段构建
 # 预估大小：~6-7GB
 
@@ -41,7 +41,6 @@ RUN python /tmp/download_models.py && rm -rf /tmp/download_models.py
 # 5. 应用代码（变更最频繁，放在最后以最大化缓存利用）
 COPY fastapi_app.py main.py .env.example ./
 COPY scripts/main.sh /app/main.sh
-COPY scripts/video2text.service /app/video2text.service
 COPY docker/docker-entrypoint.sh /app/docker-entrypoint.sh
 
 RUN chmod +x /app/docker-entrypoint.sh /app/main.sh

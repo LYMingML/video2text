@@ -57,6 +57,12 @@ class PipelineTask:
     language: str = "auto"
     device: str = "auto"
 
+    # 预处理结果
+    duration: float = 0.0
+    chunk_items: list[tuple[str, float, float]] = field(default_factory=list)
+    chunk_seconds: int = 0
+    overlap_seconds: int = 0
+
     # 转录结果
     segments: list[tuple[float, float, str]] = field(default_factory=list)
 
@@ -180,7 +186,7 @@ class Pipeline:
                 break
             try:
                 _log(task, "[STEP] 初始化任务...")
-                _notify_progress(task, 0.0, "初始化任务...")
+                _notify_progress(task, 0.0, "归档源文件...")
                 _notify_status(task, "处理中")
 
                 # 归档源文件到 temp_video
@@ -196,6 +202,7 @@ class Pipeline:
                 _log(task, f"[INPUT] {Path(staged).name}")
                 _log(task, f"[JOB] workspace/{job_dir.name}")
 
+                _notify_progress(task, 0.02, "等待 ffmpeg 提取音频...")
                 self._extract_queue.put(task)
 
             except Exception as e:
@@ -209,14 +216,14 @@ class Pipeline:
     # ------------------------------------------------------------------
 
     def _extract_worker(self):
-        """ffmpeg 提取 WAV，按后端要求设置采样率。"""
+        """ffmpeg 提取 WAV + 分片音频。"""
         while self._running:
             task = self._extract_queue.get()
             if task is None:
                 break
             try:
-                from utils.audio import extract_audio, get_audio_duration
-                from backends import get_asr_backend_info
+                from utils.audio import extract_audio, get_audio_duration, split_audio_chunks
+                from backends import get_asr_backend
 
                 job_dir = Path(task.job_dir)
                 audio_path = str(job_dir / f"{task.file_prefix}.wav")
@@ -241,31 +248,46 @@ class Pipeline:
 
                 if reuse:
                     _log(task, "[STEP] 输入已是当前任务的 WAV 文件，直接复用")
-                    _notify_progress(task, 0.05, "复用现有 WAV 文件...")
+                    _notify_progress(task, 0.05, "复用现有 WAV...")
                 else:
                     _log(task, "[STEP] 正在使用 ffmpeg 提取 WAV 文件...")
-                    _notify_progress(task, 0.02, "提取 WAV 文件...")
+                    _notify_progress(task, 0.03, "ffmpeg 提取音频中...")
 
-                    # 获取后端采样率
-                    sample_rate = 16000
-                    if task.asr_backend:
-                        try:
-                            info = get_asr_backend_info(task.asr_backend)
-                            sample_rate = info.get("sample_rate", 16000)
-                        except Exception:
-                            pass
-
-                    extract_audio(task.video_path, audio_path, sr=sample_rate)
+                    extract_audio(task.video_path, audio_path)
                     _schedule_video_deletion(task.video_path, delay_seconds=60)
 
                 _notify_progress(task, 0.05, "读取音频时长...")
                 duration = get_audio_duration(audio_path)
+                task.duration = duration
                 _log(task, f"[AUDIO] 时长: {duration:.1f}s")
 
                 # 安排 60 秒后删除临时视频文件
                 if Path(task.video_path).suffix.lower() in _SOURCE_MEDIA_EXTS:
                     _log(task, f"[MEDIA] 原始媒体已归档: {Path(task.video_path).name}")
 
+                # 分片音频
+                asr = get_asr_backend(task.asr_backend)
+                chunk_seconds = asr.default_chunk_seconds
+                overlap_seconds = asr.default_overlap_seconds
+                task.chunk_seconds = chunk_seconds
+                task.overlap_seconds = overlap_seconds
+
+                chunk_dir = job_dir / "chunks"
+                if chunk_seconds > 0 and duration > chunk_seconds:
+                    _log(task, f"[STEP] 正在按 {chunk_seconds}s 分片音频（重叠 {overlap_seconds}s）...")
+                    _notify_progress(task, 0.06, f"分片音频（每段 {chunk_seconds}s）...")
+                    task.chunk_items = split_audio_chunks(
+                        audio_path,
+                        str(chunk_dir),
+                        chunk_seconds=chunk_seconds,
+                        overlap_seconds=overlap_seconds,
+                    )
+                    _log(task, f"[CHUNK] 分片数: {len(task.chunk_items)}，粒度: {chunk_seconds}s")
+                else:
+                    _log(task, "[CHUNK] 音频较短或后端自带切片，直接转写整段")
+                    task.chunk_items = [(audio_path, 0.0, duration)]
+
+                _notify_progress(task, 0.08, "等待转录...")
                 self._transcribe_queue.put(task)
 
             except Exception as e:
@@ -306,6 +328,8 @@ class Pipeline:
                     job_dir=Path(task.job_dir),
                     log_cb=_log_hook,
                     progress_cb=_progress_hook,
+                    pre_chunked_items=task.chunk_items if task.chunk_items else None,
+                    pre_duration=task.duration if task.duration > 0 else None,
                 )
                 task.segments = segments
 

@@ -177,6 +177,8 @@ class WhisperASR(ASRBackend):
         actual_device = device
         if actual_device == "auto":
             actual_device = "cuda"
+        if actual_device.startswith("cuda"):
+            actual_device = "cuda"
 
         if progress_cb:
             progress_cb(0.0, f"加载 Whisper {model_name} 模型...")

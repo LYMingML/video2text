@@ -18,6 +18,11 @@ APP_SETTINGS_DEFAULTS = {
     "FFMPEG_THREADS": "4",  # FFmpeg 音频提取线程数
     "FUNASR_BATCH_SIZE_S": "300",  # FunASR 每批处理秒数
     "DOWNLOAD_PROXY": "",  # yt-dlp 下载代理，如 http://127.0.0.1:7897
+    "AUTO_TRANSLATE": "0",
+    "AUTO_DOWNLOAD": "0",
+    "DIRECT_SAVE": "1",
+    "DEFAULT_LANGUAGE": "自动检测",
+    "DEFAULT_DEVICE": "CUDA",
 }
 
 
