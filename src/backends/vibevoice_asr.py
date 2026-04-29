@@ -312,12 +312,14 @@ def _chunk_audio(
             logger.warning(f"切片失败: start={start}, end={end}: {r.stderr[:200]}")
 
         # 下一个切片起点（减去重叠）
-        start = end - overlap_seconds
-        if start >= duration:
+        new_start = end - overlap_seconds
+        if new_start <= start:
             break
-        # 避免最后一段太短（<30秒）
-        if duration - start < 30:
+        if new_start >= duration:
             break
+        if duration - new_start < 30:
+            break
+        start = new_start
 
     logger.info(f"切分为 {len(chunks)} 个片段")
     return chunks

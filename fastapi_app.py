@@ -107,7 +107,6 @@ import main as core
 from utils.online_models import delete_profile, load_app_settings, load_profiles, save_app_settings, save_profiles, upsert_profile
 from utils.subtitle import collect_plain_text, normalize_segments_timeline, save_plain, save_srt, segments_to_plain
 from utils.translate import is_ollama_base_url, list_available_models, translate_segments
-from core.pipeline import PipelineTask, get_pipeline
 from utils.xhs_downloader import (
     is_xiaohongshu_url,
     download_xhs_video,
@@ -149,8 +148,11 @@ class JobState:
 
 
 _RUNTIME_LOCK = threading.RLock()  # 可重入锁避免死锁
+_RUNTIME_JOB: JobState | None = None
+_RUNTIME_THREAD: threading.Thread | None = None
 
-# 任务注册表
+# 任务队列系统
+_TRANSCRIBE_QUEUE: list[str] = []
 _ALL_JOBS: dict[str, JobState] = {}
 
 # SSE 推送系统
@@ -172,89 +174,8 @@ SUBTITLE_PRIORITY_PRESETS: dict[str, str] = {
     "hi": "hi,hi.*",
 }
 
-# ---------------------------------------------------------------------------
-# 后端显示名 → 类名映射
-# ---------------------------------------------------------------------------
 
-def _display_name_to_asr_cls(display_name: str) -> str:
-    """将前端显示名映射为后端类名。支持精确匹配和前缀匹配。"""
-    try:
-        from backends import list_asr_backends, get_asr_backend
-        for cls_name in list_asr_backends():
-            backend_name = get_asr_backend(cls_name).name
-            if backend_name == display_name or display_name.startswith(backend_name):
-                return cls_name
-    except Exception:
-        pass
-    return display_name
-
-
-# ---------------------------------------------------------------------------
-# Pipeline 桥接回调：PipelineTask 进度 → JobState 更新 + SSE 推送
-# ---------------------------------------------------------------------------
-
-def _pipeline_stage_from_ratio(ratio: float) -> str:
-    if ratio <= 0.02:
-        return "下载/上传"
-    if ratio < 0.1:
-        return "预处理"
-    if ratio < 0.9:
-        return "转录中"
-    return "翻译"
-
-
-def _on_pipeline_status(task_id: str, msg: str):
-    """Pipeline 状态回调 → 更新 JobState"""
-    job = _ALL_JOBS.get(task_id)
-    if not job:
-        return
-    with _RUNTIME_LOCK:
-        if msg == "处理中":
-            job.running = True
-            job.done = False
-        elif msg == "完成" or msg == "全部完成":
-            job.running = False
-            job.done = True
-            if job.current_job and job.current_prefix:
-                try:
-                    job_dir = core.WORKSPACE_DIR / job.current_job
-                    job.zip_bundle = _build_all_bundle(job_dir, job.current_prefix)
-                except Exception:
-                    job.zip_bundle = str(core.WORKSPACE_DIR / job.current_job / f"{job.current_prefix}.zip")
-        elif msg.startswith("失败"):
-            job.running = False
-            job.failed = True
-            job.done = True
-
-
-def _on_pipeline_log(task_id: str, line: str):
-    job = _ALL_JOBS.get(task_id)
-    if not job:
-        return
-    job.add_log(line)
-    # 从 Pipeline 日志提取 job_dir 和 file_prefix
-    with _RUNTIME_LOCK:
-        if line.startswith("[JOB] "):
-            job_name = line.replace("[JOB] workspace/", "").strip()
-            if job_name:
-                job.current_job = job_name
-        if line.startswith("[INPUT] ") and not job.current_prefix:
-            fname = line.replace("[INPUT] ", "").strip()
-            if fname:
-                from pathlib import Path as _P
-                job.current_prefix = _P(fname).stem
-
-
-def _on_pipeline_progress(task_id: str, ratio: float, msg: str):
-    """Pipeline 进度回调 → 更新 JobState + SSE 推送"""
-    job = _ALL_JOBS.get(task_id)
-    if not job:
-        return
-    pct = max(0, min(100, int(ratio * 100)))
-    _set_job_progress(job, msg, time.time(), progress_pct=pct, step_label=msg)
-
-
-
+def _normalize_subtitle_priority(value: str) -> str:
     raw = (value or "").strip()
     if not raw:
         return "zh"
@@ -372,11 +293,21 @@ def _resolve_external_input(payload: dict[str, Any], auto_subtitle_lang: str) ->
 
 
 def _get_job(job_id: str) -> JobState:
+    global _RUNTIME_JOB
+    if _RUNTIME_JOB and _RUNTIME_JOB.job_id == job_id:
+        return _RUNTIME_JOB
+    # 也从 _ALL_JOBS 中查找排队中/已完成的任务
     with _RUNTIME_LOCK:
         job = _ALL_JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
     return job
+
+
+def _set_job_state(job: JobState):
+    global _RUNTIME_JOB
+    with _RUNTIME_LOCK:
+        _RUNTIME_JOB = job
 
 
 def _json_job(job: JobState) -> dict[str, Any]:
@@ -420,7 +351,7 @@ def _json_job(job: JobState) -> dict[str, Any]:
 
 
 def _get_queue_status() -> dict:
-    """获取队列状态，包含所有任务（按 4 阶段分桶）"""
+    """获取队列状态，包含所有任务（运行中、排队中、已完成、失败）"""
     with _RUNTIME_LOCK:
         # 清理过旧的已完成任务，最多保留 200 条
         if len(_ALL_JOBS) > 200:
@@ -429,56 +360,61 @@ def _get_queue_status() -> dict:
             for old_id in done_ids[:len(_ALL_JOBS) - 200]:
                 del _ALL_JOBS[old_id]
 
+        queue_jobs = [_ALL_JOBS[jid] for jid in _TRANSCRIBE_QUEUE if jid in _ALL_JOBS]
+        running_job = _json_job(_RUNTIME_JOB) if _RUNTIME_JOB and _RUNTIME_JOB.running else None
+        # 返回所有任务，按 updated_at 倒序，最多 50 条
         all_jobs = sorted(_ALL_JOBS.values(), key=lambda j: j.updated_at, reverse=True)[:50]
-        all_json = [_json_job(j) for j in all_jobs]
-
-        # 按 step_label 分桶到 4 个阶段
-        download_jobs = []
-        extract_jobs = []
-        transcribe_jobs = []
-        translate_jobs = []
-        done_jobs = []
-
-        for j in all_json:
-            if j.get("done"):
-                done_jobs.append(j)
-                continue
-            if j.get("running"):
-                pct = j.get("progress_pct", 0)
-                if pct >= 90:
-                    translate_jobs.append(j)
-                elif pct >= 10:
-                    transcribe_jobs.append(j)
-                elif pct >= 2:
-                    extract_jobs.append(j)
-                else:
-                    download_jobs.append(j)
-            else:
-                download_jobs.append(j)
-
-        # Pipeline 队列深度
-        p = get_pipeline()
-        queue_depths = {}
-        for name, q in [("download", p._download_queue), ("extract", p._extract_queue),
-                        ("transcribe", p._transcribe_queue), ("translate", p._translate_queue)]:
-            queue_depths[name] = q.qsize()
-
         return {
-            "stages": {
-                "download": {"jobs": download_jobs, "label": "下载/上传", "queue_depth": queue_depths["download"]},
-                "extract": {"jobs": extract_jobs, "label": "预处理", "queue_depth": queue_depths["extract"]},
-                "transcribe": {"jobs": transcribe_jobs, "label": "转录", "queue_depth": queue_depths["transcribe"]},
-                "translate": {"jobs": translate_jobs, "label": "翻译", "queue_depth": queue_depths["translate"]},
-            },
-            "done_jobs": done_jobs,
-            "all_jobs": all_json,
-            # 兼容旧前端
-            "running_job": next((j for j in all_json if j.get("running")), None),
-            "transcribe_count": len(download_jobs) + len(extract_jobs) + len(transcribe_jobs) + len(translate_jobs),
-            "total_count": len([j for j in all_json if not j.get("done")]),
+            "transcribe_queue": [_json_job(j) for j in queue_jobs],
+            "transcribe_count": len(_TRANSCRIBE_QUEUE),
+            "running_job": running_job,
+            "total_count": len(_TRANSCRIBE_QUEUE) + (1 if running_job else 0),
+            "all_jobs": [_json_job(j) for j in all_jobs],
         }
 
 
+def _schedule_next_transcribe():
+    """任务完成后调度下一个任务"""
+    global _RUNTIME_THREAD, _RUNTIME_JOB
+    logger.info(f"[queue] 调度下一任务: 队列剩余={len(_TRANSCRIBE_QUEUE)} 当前运行={_RUNTIME_JOB.job_id if _RUNTIME_JOB else None}")
+    with _RUNTIME_LOCK:
+        if _RUNTIME_JOB and _RUNTIME_JOB.running:
+            logger.info(f"[queue] 当前任务仍在运行, 跳过调度")
+            return
+        if not _TRANSCRIBE_QUEUE:
+            _RUNTIME_JOB = None
+            logger.info(f"[queue] 队列为空, 无下一任务")
+            return
+        next_job_id = _TRANSCRIBE_QUEUE.pop(0)
+        logger.info(f"[queue] 弹出下一任务: {next_job_id}")
+        next_job = _ALL_JOBS.get(next_job_id)
+        if not next_job:
+            return
+        next_job.running = True
+        next_job.status = "⏳ 任务已启动"
+        _RUNTIME_JOB = next_job
+
+    logger.info(f"开始队列任务: {next_job_id}")
+    _set_job_progress(next_job, "⏳ 任务已启动", time.time(), progress_pct=1, eta_seconds=0, step_label="任务启动")
+
+    video_path = getattr(next_job, 'video_path', '') or ''
+    params = getattr(next_job, 'translate_params', {}) or {}
+    backend = params.get('backend', 'faster-whisper（多语言）')
+    language = params.get('language', '自动检测')
+    whisper_model = params.get('whisper_model', 'large-v3')
+    funasr_model = params.get('funasr_model', 'paraformer-zh')
+    device = params.get('device', 'CUDA')
+
+    def runner():
+        try:
+            _run_transcribe_worker(next_job, video_path, backend, language, whisper_model, funasr_model, device)
+        finally:
+            core.set_transcribing_video(None)
+            _schedule_next_transcribe()
+
+    core.set_transcribing_video(video_path)
+    _RUNTIME_THREAD = threading.Thread(target=runner, daemon=True)
+    _RUNTIME_THREAD.start()
 
 
 def _format_hms(seconds: float) -> str:
@@ -569,6 +505,7 @@ def _notify_sse(job: JobState):
     """通知所有订阅该 job 的 SSE 连接。节流：进度变化 < 1% 且无关键状态变化时跳过。"""
     subscribers = _job_subscribers.get(job.job_id)
     if not subscribers:
+        logger.debug(f"[SSE] 无订阅者: {job.job_id} done={job.done} running={job.running} step={job.step_label}")
         return
 
     last_pct = _last_pushed_pct.get(job.job_id, -1)
@@ -581,6 +518,8 @@ def _notify_sse(job: JobState):
 
     _last_pushed_pct[job.job_id] = cur_pct
     data = _json_job(job)
+    if job.done:
+        logger.info(f"[SSE] 推送完成事件: job_id={job.job_id} done={job.done} running={job.running} step={job.step_label} subscribers={len(subscribers)}")
 
     for q in subscribers:
         try:
@@ -741,6 +680,7 @@ def _run_transcribe_worker(
         with _RUNTIME_LOCK:
             job.done = True
             job.running = False
+        logger.info(f"[transcribe] 转录完成: job_id={job.job_id} auto_translate={job.auto_translate} auto_download={job.auto_download}")
         _set_job_progress(
             job,
             f"✅ 原文识别完成（100%）→ workspace/{job_dir.name}/（点击翻译并选择目标语言）",
@@ -1022,6 +962,7 @@ def _run_translate_worker(job: JobState, profile_name: str, model_name: str, tar
         with _RUNTIME_LOCK:
             job.done = True
             job.running = False
+        logger.info(f"[translate] 翻译完成: job_id={job.job_id} auto_download={job.auto_download}")
         _set_job_progress(
             job,
             f"✅ 翻译完成（100%，目标语言: {use_target_lang}）：workspace/{job.current_job}/",
@@ -1447,15 +1388,15 @@ button:hover{transform:translateY(-1px);background:#ecfaf4}
                             <button onclick="startTranslate()">翻译</button>
                             <button onclick="downloadOutputZip()">下载输出文件</button>
                             <label class="inline-toggle" title="转录完成后自动翻译">
-                                <input type="checkbox" id="autoTranslate" onchange="saveUiPreferences()" />
+                                <input type="checkbox" id="autoTranslate" />
                                 <span>自动翻译</span>
                             </label>
                             <label class="inline-toggle" title="完成后自动下载 ZIP">
-                                <input type="checkbox" id="autoDownload" onchange="saveUiPreferences()" />
+                                <input type="checkbox" id="autoDownload" />
                                 <span>自动下载</span>
                             </label>
                             <label class="inline-toggle" title="自动保存到浏览器默认下载路径（无需弹窗确认）">
-                                <input type="checkbox" id="directSave" onchange="saveUiPreferences()" />
+                                <input type="checkbox" id="directSave" />
                                 <span>直接保存</span>
                             </label>
                             <span class="action-spacer"></span>
@@ -1487,7 +1428,7 @@ button:hover{transform:translateY(-1px);background:#ecfaf4}
                     <div class="drag-row">
                         <div class="drag-item field" draggable="true">
                             <label for="homeBackendSel">识别后端</label>
-                            <select id="homeBackendSel" onchange="onHomeBackendChange(); saveUiPreferences()">
+                            <select id="homeBackendSel" onchange="onHomeBackendChange()">
                                 <option>VibeVoice ASR（长音频+说话人分离）</option>
                                 <option>FunASR（Paraformer）</option>
                                 <option>faster-whisper（多语言）</option>
@@ -1511,7 +1452,7 @@ button:hover{transform:translateY(-1px);background:#ecfaf4}
                         <div class="drag-item field" draggable="true">
                             <label for="homeBackendModelSel">后端模型（含特性）</label>
                             <input id="homeBackendModelSearch" placeholder="筛选后端模型" oninput="filterBackendModels()" />
-                            <select id="homeBackendModelSel" class="backend-model-select" onchange="saveUiPreferences()"></select>
+                            <select id="homeBackendModelSel" class="backend-model-select"></select>
                         </div>
                     </div>
                     <div class="drag-row">
@@ -1673,7 +1614,7 @@ button:hover{transform:translateY(-1px);background:#ecfaf4}
                     </div>
                     <div class="field compact">
                         <label for="langSel">语言</label>
-                        <select id="langSel" onchange="saveUiPreferences()">
+                        <select id="langSel">
                             <option>自动检测</option>
                             <option>zh（普通话）</option>
                             <option>yue（粤语）</option>
@@ -1685,7 +1626,7 @@ button:hover{transform:translateY(-1px);background:#ecfaf4}
                     </div>
                     <div class="field compact">
                         <label for="deviceSel">推理设备</label>
-                        <select id="deviceSel" onchange="saveUiPreferences()">
+                        <select id="deviceSel">
                             <option>CUDA</option>
                             <option>CPU</option>
                         </select>
@@ -1758,35 +1699,19 @@ button:hover{transform:translateY(-1px);background:#ecfaf4}
                     <button onclick="refreshQueueStatus()">刷新状态</button>
                 </div>
                 <div class="task-panel" style="margin-top:12px">
-                    <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px">
-                        <div>
-                            <h4 style="margin:0 0 6px;font-size:13px;color:#5b9bd5">下载/上传 <span id="stageCountDownload">(0)</span></h4>
-                            <div id="stageDownload" style="min-height:60px;max-height:300px;overflow-y:auto;border:1px solid #e0e0e0;border-radius:6px;padding:6px">
-                                <div class="selection-hint" style="padding:8px;text-align:center;font-size:11px;color:#aaa">暂无</div>
-                            </div>
-                        </div>
-                        <div>
-                            <h4 style="margin:0 0 6px;font-size:13px;color:#f0ad4e">预处理 <span id="stageCountExtract">(0)</span></h4>
-                            <div id="stageExtract" style="min-height:60px;max-height:300px;overflow-y:auto;border:1px solid #e0e0e0;border-radius:6px;padding:6px">
-                                <div class="selection-hint" style="padding:8px;text-align:center;font-size:11px;color:#aaa">暂无</div>
-                            </div>
-                        </div>
-                        <div>
-                            <h4 style="margin:0 0 6px;font-size:13px;color:#2abfa6">转录 <span id="stageCountTranscribe">(0)</span></h4>
-                            <div id="stageTranscribe" style="min-height:60px;max-height:300px;overflow-y:auto;border:1px solid #e0e0e0;border-radius:6px;padding:6px">
-                                <div class="selection-hint" style="padding:8px;text-align:center;font-size:11px;color:#aaa">暂无</div>
-                            </div>
-                        </div>
-                        <div>
-                            <h4 style="margin:0 0 6px;font-size:13px;color:#9b59b6">翻译 <span id="stageCountTranslate">(0)</span></h4>
-                            <div id="stageTranslate" style="min-height:60px;max-height:300px;overflow-y:auto;border:1px solid #e0e0e0;border-radius:6px;padding:6px">
-                                <div class="selection-hint" style="padding:8px;text-align:center;font-size:11px;color:#aaa">暂无</div>
-                            </div>
-                        </div>
+                    <h4 style="margin:0 0 10px;font-size:14px">当前运行任务</h4>
+                    <div id="runningJobContainer">
+                        <div class="selection-hint" style="padding:12px;text-align:center">暂无运行中的任务</div>
                     </div>
                 </div>
                 <div class="task-panel" style="margin-top:16px">
-                    <h4 style="margin:0 0 8px;font-size:13px">已完成</h4>
+                    <h4 style="margin:0 0 8px;font-size:13px">排队中 <span id="transcribeQueueCount">(0)</span></h4>
+                    <div id="transcribeQueueList" style="max-height:200px;overflow-y:auto">
+                        <div class="selection-hint" style="padding:10px;text-align:center;font-size:12px">暂无排队</div>
+                    </div>
+                </div>
+                <div class="task-panel" style="margin-top:16px">
+                    <h4 style="margin:0 0 8px;font-size:13px">历史任务</h4>
                     <div id="allJobsList" style="max-height:400px;overflow-y:auto">
                         <div class="selection-hint" style="padding:10px;text-align:center;font-size:12px">暂无任务记录</div>
                     </div>
@@ -1810,7 +1735,7 @@ let currentJobId = "";
 let pollTimer = null;
 let eventSource = null;
 let _prevJobState = { current_job:'', step_label:'', done:false };
-let pendingAutoFlags = { download: false };
+let pendingAutoFlags = { translate: false, download: false };
 let foldersList = [];
 let foldersListMeta = [];  // 文件夹元数据 [{name, mtime, size}]
 let selectedFolders = new Set();
@@ -3007,67 +2932,64 @@ async function refreshQueueStatus(){
 }
 
 function renderQueueStatus(data){
-  // 渲染 4 个阶段列
-  const stageMap = {download:'stageDownload',extract:'stageExtract',transcribe:'stageTranscribe',translate:'stageTranslate'};
-  const countMap = {download:'stageCountDownload',extract:'stageCountExtract',transcribe:'stageCountTranscribe',translate:'stageCountTranslate'};
-  const stages = data.stages || {};
-
-  for(const [key, containerId] of Object.entries(stageMap)){
-    const container = document.getElementById(containerId);
-    const countEl = document.getElementById(countMap[key]);
-    const stage = stages[key] || {};
-    const jobs = stage.jobs || [];
-    const depth = stage.queue_depth || 0;
-    if(countEl) countEl.textContent = '(' + jobs.length + ')';
-    if(!container) continue;
-    if(jobs.length === 0){
-      container.innerHTML = '<div style="padding:8px;text-align:center;font-size:11px;color:#aaa">暂无</div>';
+  const runningContainer = document.getElementById('runningJobContainer');
+  if(runningContainer){
+    if(data.running_job){
+      const job = data.running_job;
+      const fileName = job.display_name || job.current_job || '未知文件';
+      const metaStr = _buildMetaStr(job);
+      runningContainer.innerHTML = '<div style="border:1px solid #d0e8dc;border-radius:8px;padding:12px;background:#fff">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">' +
+        '<span style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:70%">' + fileName + '</span>' +
+        '<span style="color:#2abfa6;font-size:12px">运行中</span></div>' +
+        '<div style="font-size:11px;color:#888;margin-bottom:8px">' + metaStr + '</div>' +
+        '<div style="margin-bottom:6px"><div style="height:6px;background:#e0e0e0;border-radius:3px;overflow:hidden">' +
+        '<div style="height:100%;width:' + job.progress_pct + '%;background:#2abfa6"></div></div></div>' +
+        '<div style="font-size:12px;color:#666">' + (job.step_label || '处理中') + '</div></div>';
     }else{
-      let html = '';
-      let activeIdx = -1;
-      jobs.forEach((j, i) => { if(j.running && activeIdx < 0) activeIdx = i; });
-      jobs.forEach((job, idx) => {
-        const fileName = (job.display_name || job.current_job || '未知文件');
-        const shortName = fileName.length > 25 ? fileName.substring(0,25)+'...' : fileName;
-        const pct = job.progress_pct || 0;
-        const isActive = job.running;
-        let stepText = '';
-        if(isActive){
-          stepText = pct > 0 ? (job.step_label||'处理中')+' '+pct+'%' : (job.step_label||'处理中');
-        } else if(activeIdx >= 0){
-          const waitPos = idx > activeIdx ? idx - activeIdx : idx + 1;
-          stepText = '排队 #'+waitPos+' — 等待'+(stage.label||'')+'完成';
-        } else {
-          stepText = '等待处理';
-        }
-        const border = isActive ? 'border:1px solid #2abfa6;background:#f0faf7;' : 'border-bottom:1px solid #eee;';
-        html += '<div style="padding:6px 4px;'+border+'border-radius:4px;margin-bottom:3px">' +
-          '<div style="display:flex;justify-content:space-between;align-items:center">' +
-          '<span style="font-size:12px;font-weight:'+(isActive?'600':'400')+';overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60%">'+shortName+'</span>' +
-          (isActive ? '<span style="font-size:10px;color:#2abfa6">● 运行中</span>' : '<span style="font-size:10px;color:#aaa">#'+(idx+1)+'</span>') +
-          '</div>';
-        if(isActive && pct > 0){
-          html += '<div style="margin:3px 0"><div style="height:4px;background:#e0e0e0;border-radius:2px;overflow:hidden">' +
-            '<div style="height:100%;width:'+pct+'%;background:#2abfa6"></div></div></div>';
-        }
-        html += '<div style="font-size:10px;color:'+(isActive?'#2abfa6':'#999')+'">'+stepText+'</div></div>';
-      });
-      container.innerHTML = html;
+      runningContainer.innerHTML = '<div class="selection-hint" style="padding:12px;text-align:center">暂无运行中的任务</div>';
     }
   }
 
-  // 已完成任务
+  const countEl = document.getElementById('transcribeQueueCount');
+  if(countEl) countEl.textContent = '(' + (data.transcribe_count || 0) + ')';
+
+  const queueContainer = document.getElementById('transcribeQueueList');
+  if(queueContainer){
+    const jobs = data.transcribe_queue || [];
+    if(jobs.length === 0){
+      queueContainer.innerHTML = '<div class="selection-hint" style="padding:10px;text-align:center;font-size:12px">暂无排队</div>';
+    }else{
+      let html = '';
+      jobs.forEach((job, idx) => {
+        const fileName = job.display_name || '未知文件';
+        const metaStr = _buildMetaStr(job);
+        html += '<div style="padding:6px 8px;border-bottom:1px solid #eee">' +
+          '<div style="display:flex;align-items:center;gap:8px">' +
+          '<span style="color:#7dbfa6;font-weight:600">#' + (idx + 1) + '</span>' +
+          '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + fileName + '</span></div>' +
+          '<div style="font-size:11px;color:#888;margin-left:24px">' + metaStr + '</div></div>';
+      });
+      queueContainer.innerHTML = html;
+    }
+  }
+
+  // 历史任务：显示非运行中、非排队的所有任务
   const allJobsContainer = document.getElementById('allJobsList');
   if(allJobsContainer){
-    const doneJobs = data.done_jobs || [];
-    if(doneJobs.length === 0){
+    const allJobs = data.all_jobs || [];
+    const runningId = data.running_job ? data.running_job.job_id : '';
+    const queueIds = new Set((data.transcribe_queue || []).map(j => j.job_id));
+    const historyJobs = allJobs.filter(j => j.job_id !== runningId && !queueIds.has(j.job_id));
+    if(historyJobs.length === 0){
       allJobsContainer.innerHTML = '<div class="selection-hint" style="padding:10px;text-align:center;font-size:12px">暂无任务记录</div>';
     }else{
       let html = '';
-      doneJobs.forEach(job => {
+      historyJobs.forEach(job => {
         const fileName = job.display_name || '未知文件';
-        const statusColor = job.failed ? '#e74c3c' : '#2abfa6';
-        const statusText = job.failed ? '失败' : '已完成';
+        const metaStr = _buildMetaStr(job);
+        const statusColor = job.failed ? '#e74c3c' : (job.done ? '#2abfa6' : '#888');
+        const statusText = job.failed ? '失败' : (job.done ? '已完成' : job.status);
         const timeStr = job.updated_at ? new Date(job.updated_at * 1000).toLocaleTimeString() : '';
         html += '<div style="padding:6px 8px;border-bottom:1px solid #eee">' +
           '<div style="display:flex;justify-content:space-between;align-items:center">' +
@@ -3075,7 +2997,8 @@ function renderQueueStatus(data){
           '<div style="display:flex;align-items:center;gap:6px">' +
           '<span style="font-size:11px;color:' + statusColor + '">' + statusText + '</span>' +
           (timeStr ? '<span style="font-size:10px;color:#aaa">' + timeStr + '</span>' : '') +
-          '</div></div></div>';
+          '</div></div>' +
+          '<div style="font-size:11px;color:#888;margin-top:2px">' + metaStr + '</div></div>';
       });
       allJobsContainer.innerHTML = html;
     }
@@ -3265,11 +3188,6 @@ function applyAppSettings(settings){
                 funasrModel: settings?.DEFAULT_FUNASR_MODEL || settings?.funasrModel || APP_DEFAULTS.funasrModel,
                 whisperModel: settings?.DEFAULT_WHISPER_MODEL || settings?.whisperModel || APP_DEFAULTS.whisperModel,
         autoSubtitleLang: normalizeSubtitlePriority(settings?.AUTO_SUBTITLE_LANG || settings?.autoSubtitleLang || settings?.AUTO_SUBTITLE_LANGS || settings?.autoSubtitleLangs || APP_DEFAULTS.autoSubtitleLang),
-        language: settings?.DEFAULT_LANGUAGE || settings?.language || '自动检测',
-        device: settings?.DEFAULT_DEVICE || settings?.device || 'CUDA',
-        autoTranslate: settings?.AUTO_TRANSLATE === '1',
-        autoDownload: settings?.AUTO_DOWNLOAD === '1',
-        directSave: settings?.DIRECT_SAVE !== '0',
         };
         const backendSel = document.getElementById('backendSel');
         const homeBackendSel = document.getElementById('homeBackendSel');
@@ -3283,35 +3201,9 @@ function applyAppSettings(settings){
         if(autoSubtitleLangs){
             const hasValue = Array.from(autoSubtitleLangs.options).some(opt => opt.value === merged.autoSubtitleLang);
             autoSubtitleLangs.value = hasValue ? merged.autoSubtitleLang : APP_DEFAULTS.autoSubtitleLang;
+            lastSavedAutoSubtitleLang = autoSubtitleLangs.value;
         }
-    const langSel = document.getElementById('langSel');
-    if(langSel) langSel.value = merged.language;
-    const deviceSel = document.getElementById('deviceSel');
-    if(deviceSel) deviceSel.value = merged.device;
-    const autoTranslateCb = document.getElementById('autoTranslate');
-    if(autoTranslateCb) autoTranslateCb.checked = merged.autoTranslate;
-    const autoDownloadCb = document.getElementById('autoDownload');
-    if(autoDownloadCb) autoDownloadCb.checked = merged.autoDownload;
-    const directSaveCb = document.getElementById('directSave');
-    if(directSaveCb) directSaveCb.checked = merged.directSave;
-    lastSavedAutoSubtitleLang = autoSubtitleLangs ? autoSubtitleLangs.value : '';
-    onHomeBackendChange(merged.backend === 'faster-whisper（多语言）' ? merged.whisperModel : merged.funasrModel);
-}
-
-function saveUiPreferences(){
-    const backend = document.getElementById('homeBackendSel')?.value || '';
-    const funasrModel = document.getElementById('funasrModel')?.value || '';
-    const whisperModel = document.getElementById('whisperModel')?.value || '';
-    const language = document.getElementById('langSel')?.value || '自动检测';
-    const device = document.getElementById('deviceSel')?.value || 'CUDA';
-    const autoTranslate = document.getElementById('autoTranslate')?.checked ? '1' : '0';
-    const autoDownload = document.getElementById('autoDownload')?.checked ? '1' : '0';
-    const directSave = document.getElementById('directSave')?.checked ? '1' : '0';
-    api('/api/app-settings/ui-preferences', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({backend, funasr_model:funasrModel, whisper_model:whisperModel, language, device, auto_translate:autoTranslate, auto_download:autoDownload, direct_save:directSave})
-    }).catch(()=>{});
+        onHomeBackendChange(merged.backend === 'faster-whisper（多语言）' ? merged.whisperModel : merged.funasrModel);
 }
 
 function fillProfile(p){
@@ -3407,7 +3299,7 @@ function backendFormData(fd){
   fd.append('device', document.getElementById('deviceSel').value || 'CUDA');
 }
 
-async function downloadOutputZip(forceBlob){
+async function downloadOutputZip(){
     if(!currentJobId){
         alert('请先开始并完成任务');
         return;
@@ -3425,7 +3317,7 @@ async function downloadOutputZip(forceBlob){
         return;
     }
     const url = '/api/jobs/'+currentJobId+'/download-file?file_name='+encodeURIComponent(zipName);
-    if(forceBlob || document.getElementById('directSave')?.checked){
+    if(document.getElementById('directSave')?.checked){
         // fetch+blob 方式：可靠地保存到浏览器默认下载路径（不受用户手势限制）
         const resp = await fetch(url);
         if(!resp.ok) throw new Error('下载失败: '+resp.status);
@@ -3534,8 +3426,10 @@ async function startTranscribe(){
   fd.append('auto_translate', document.getElementById('autoTranslate').checked ? '1' : '0');
   fd.append('auto_download', document.getElementById('autoDownload').checked ? '1' : '0');
   pendingAutoFlags = {
+    translate: document.getElementById('autoTranslate').checked,
     download: document.getElementById('autoDownload').checked,
   };
+  console.log('[startTranscribe] pendingAutoFlags:', JSON.parse(JSON.stringify(pendingAutoFlags)));
   backendFormData(fd);
 
   document.getElementById('statusText').value = '⏳ 正在启动转录任务...';
@@ -3544,6 +3438,7 @@ async function startTranscribe(){
   if(!r.ok){ throw new Error(await r.text()); }
   const data = await r.json();
   currentJobId = data.job_id;
+  console.log('[startTranscribe] jobId:', data.job_id, 'queued:', data.queued);
 
   // 如果返回了视频路径，更新当前视频选择框
   if(data.video_path){
@@ -3574,6 +3469,7 @@ async function startTranslate(){
                 target_lang: document.getElementById('targetLangSel').value || 'zh',
                 parallel_threads: document.getElementById('parallelThreadSel')?.value || '5'
         };
+  console.log('[startTranslate] jobId:', currentJobId, 'payload:', payload);
   await api('/api/jobs/'+currentJobId+'/translate', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
   startPoll();
 }
@@ -3629,6 +3525,14 @@ async function handleJobUpdate(data){
     const stepChanged = data.step_label && data.step_label !== _prevJobState.step_label;
     const justDone = data.done && !data.running && !_prevJobState.done;
 
+    console.log('[handleJobUpdate]', {
+      jobId: data.job_id, currentJobId,
+      done: data.done, running: data.running, failed: data.failed,
+      step_label: data.step_label, auto_translate: data.auto_translate, auto_download: data.auto_download,
+      prevDone: _prevJobState.done, justDone,
+      pendingAutoFlags: JSON.parse(JSON.stringify(pendingAutoFlags)),
+    });
+
     if(jobChanged && data.current_job && data.current_prefix){
         const expectedWav = `workspace/${data.current_job}/${data.current_prefix}.wav`;
         refreshHistory(expectedWav);
@@ -3644,19 +3548,44 @@ async function handleJobUpdate(data){
     };
 
     if(justDone){
+        console.log('[justDone] 进入完成处理, step_label:', data.step_label);
         const preferredWav = (data.current_job && data.current_prefix)
             ? `workspace/${data.current_job}/${data.current_prefix}.wav`
             : '';
         await refreshHistory(preferredWav, data.current_job || '');
         refreshQueueStatus();
 
-        // 任务完成时触发自动下载（翻译由 Pipeline 后端自动处理）
-        if(pendingAutoFlags.download && !data.failed){
-          pendingAutoFlags.download = false;
+        // 兜底：仅在转录阶段恢复客户端丢失的标志，翻译阶段不恢复避免重复触发
+        const isTranscribeDone = !data.step_label || !data.step_label.includes('翻译');
+        console.log('[justDone] isTranscribeDone:', isTranscribeDone);
+        if(isTranscribeDone){
+          if(!pendingAutoFlags.translate && data.auto_translate){
+            pendingAutoFlags.translate = true;
+            console.log('[justDone] 兜底恢复 translate 标志');
+          }
+          if(!pendingAutoFlags.download && data.auto_download){
+            pendingAutoFlags.download = true;
+            console.log('[justDone] 兜底恢复 download 标志');
+          }
+        }
+        console.log('[justDone] 判断前 pendingAutoFlags:', JSON.parse(JSON.stringify(pendingAutoFlags)));
+        if(pendingAutoFlags.translate && !data.failed){
+          console.log('[justDone] ★ 触发自动翻译, currentJobId:', currentJobId);
+          pendingAutoFlags.translate = false;
           _stopPoll();
-          try{ await downloadOutputZip(true); }catch(e){ console.error('自动下载失败', e); }
+          try{
+            await startTranslate();
+          }catch(e){
+            console.error('[justDone] 自动翻译失败', e);
+          }
         } else {
+          console.log('[justDone] 进入 else 分支, download:', pendingAutoFlags.download, 'failed:', data.failed);
           _stopPoll();
+          if(pendingAutoFlags.download && !data.failed){
+            pendingAutoFlags.download = false;
+            console.log('[justDone] ★ 触发自动下载');
+            try{ await downloadOutputZip(); }catch(e){ console.error('自动下载失败', e); }
+          }
         }
     }
 }
@@ -3906,6 +3835,7 @@ def api_folder_output_files(folder_name: str):
 @app.post("/api/folders/translate")
 def api_folder_translate(payload: dict[str, str]):
     """对已有文件夹中的 SRT 字幕执行翻译"""
+    global _RUNTIME_THREAD, _RUNTIME_JOB
     folder_name = str(payload.get("folder_name", "")).strip()
     if not folder_name:
         raise HTTPException(status_code=400, detail="folder_name 不能为空")
@@ -3937,18 +3867,24 @@ def api_folder_translate(payload: dict[str, str]):
         display_name=display_name,
         auto_translate=True,
     )
-    job.current_job = job_dir.name
-    job.current_prefix = file_prefix
     with _RUNTIME_LOCK:
-        _ALL_JOBS[job.job_id] = job
+        if _RUNTIME_JOB and _RUNTIME_JOB.running:
+            raise HTTPException(status_code=409, detail="已有任务运行中")
         job.running = True
+        job.current_job = job_dir.name
+        job.current_prefix = file_prefix
+        _RUNTIME_JOB = job
+        _ALL_JOBS[job.job_id] = job
 
     _set_job_progress(job, "⏳ 翻译准备中", time.time(), progress_pct=1, eta_seconds=0, step_label="翻译启动")
 
-    t = threading.Thread(
+    job.current_job = job_dir.name
+    job.current_prefix = file_prefix
+
+    _RUNTIME_THREAD = threading.Thread(
         target=_run_translate_worker, args=(job, profile_name, model_name, target_lang), daemon=True
     )
-    t.start()
+    _RUNTIME_THREAD.start()
 
     return {"job_id": job.job_id, "folder_name": folder_name}
 
@@ -4250,29 +4186,6 @@ def api_save_subtitle_priority(payload: dict[str, str]):
     return {"message": "ok", "AUTO_SUBTITLE_LANG": value}
 
 
-@app.post("/api/app-settings/ui-preferences")
-def api_save_ui_preferences(payload: dict[str, str]):
-    """保存主页 UI 偏好（后端、模型、语言、设备、复选框状态）到 .env"""
-    mapping = {
-        "backend": "DEFAULT_BACKEND",
-        "funasr_model": "DEFAULT_FUNASR_MODEL",
-        "whisper_model": "DEFAULT_WHISPER_MODEL",
-        "language": "DEFAULT_LANGUAGE",
-        "device": "DEFAULT_DEVICE",
-        "auto_translate": "AUTO_TRANSLATE",
-        "auto_download": "AUTO_DOWNLOAD",
-        "direct_save": "DIRECT_SAVE",
-    }
-    updates = {}
-    for js_key, env_key in mapping.items():
-        if js_key in payload:
-            val = str(payload[js_key]).strip()
-            updates[env_key] = val
-    if updates:
-        save_app_settings(updates)
-    return {"message": "ok"}
-
-
 @app.post("/api/model/profiles/delete")
 def api_delete_profile(payload: dict[str, str]):
     name = payload.get("name", "").strip()
@@ -4554,6 +4467,11 @@ def api_upload_cookie(cookie_file: UploadFile = File(...)):
 
 @app.post("/api/jobs/import-subtitle")
 def api_job_import_subtitle(payload: dict[str, str]):
+    global _RUNTIME_THREAD
+
+    with _RUNTIME_LOCK:
+        if _RUNTIME_JOB and _RUNTIME_JOB.running:
+            raise HTTPException(status_code=409, detail="已有任务运行中")
 
     history_video = (payload.get("history_video") or "").strip()
     subtitle_path_input = (payload.get("subtitle_path") or "").strip()
@@ -4575,14 +4493,14 @@ def api_job_import_subtitle(payload: dict[str, str]):
         raise HTTPException(status_code=404, detail="字幕文件不存在")
 
     job = JobState(job_id=uuid.uuid4().hex, running=True, status="⏳ 正在导入平台自动字幕")
-    with _RUNTIME_LOCK:
-        _ALL_JOBS[job.job_id] = job
     _set_job_progress(job, "⏳ 正在导入平台自动字幕", time.time(), progress_pct=10, eta_seconds=0, step_label="导入字幕")
+    _set_job_state(job)
 
     def runner():
         _run_subtitle_import_worker(job, str(media), str(subtitle_path))
 
-    threading.Thread(target=runner, daemon=True).start()
+    _RUNTIME_THREAD = threading.Thread(target=runner, daemon=True)
+    _RUNTIME_THREAD.start()
     return {"job_id": job.job_id}
 
 
@@ -4598,6 +4516,7 @@ def api_transcribe_start(
     auto_translate: str = Form(default="0"),
     auto_download: str = Form(default="0"),
 ):
+    global _RUNTIME_THREAD
 
     app_settings = load_app_settings()
     backend = backend or app_settings["DEFAULT_BACKEND"]
@@ -4643,8 +4562,6 @@ def api_transcribe_start(
         raise HTTPException(status_code=400, detail="请上传文件或选择当前视频")
 
     display_name = Path(video_path).name if video_path else ""
-    do_auto_translate = auto_translate in ("1", "true", "yes")
-    do_auto_download = auto_download in ("1", "true", "yes")
     job = JobState(
         job_id=uuid.uuid4().hex,
         running=False,
@@ -4658,59 +4575,55 @@ def api_transcribe_start(
             "funasr_model": funasr_model,
             "device": device,
         },
-        auto_translate=do_auto_translate,
-        auto_download=do_auto_download,
+        auto_translate=auto_translate in ("1", "true", "yes"),
+        auto_download=auto_download in ("1", "true", "yes"),
     )
 
+    # 检查是否有任务运行中
     with _RUNTIME_LOCK:
+        if _RUNTIME_JOB and _RUNTIME_JOB.running:
+            _ALL_JOBS[job.job_id] = job
+            _TRANSCRIBE_QUEUE.append(job.job_id)
+            job.status = f"⏳ 排队中（位置 {len(_TRANSCRIBE_QUEUE)}）"
+            logger.info(f"任务 {job.job_id} 加入队列，位置 {len(_TRANSCRIBE_QUEUE)}")
+            display_path = ""
+            if video_path:
+                try:
+                    display_path = str(Path(video_path).relative_to(Path(__file__).parent))
+                except ValueError:
+                    display_path = video_path
+            return {"job_id": job.job_id, "video_path": display_path, "queued": True, "queue_position": len(_TRANSCRIBE_QUEUE)}
+
+        job.running = True
+        job.status = "⏳ 任务已启动"
+        _set_job_state(job)
         _ALL_JOBS[job.job_id] = job
 
-    # 解析翻译配置
-    translate_base_url = ""
-    translate_api_key = ""
-    translate_model_name = ""
-    target_lang = "zh"
-    if do_auto_translate:
+    _set_job_progress(job, "⏳ 任务已启动", time.time(), progress_pct=1, eta_seconds=0, step_label="任务启动")
+
+    def runner():
         try:
-            profiles, active = load_profiles()
-            profile = next((p for p in profiles if p.get("name") == active), profiles[0] if profiles else {})
-            translate_base_url = str(profile.get("base_url", "")).strip()
-            translate_api_key = str(profile.get("api_key", "")).strip()
-            translate_model_name = str(profile.get("default_model", "")).strip()
-            app_settings = load_app_settings()
-            target_lang = _normalize_lang_code(app_settings.get("DEFAULT_TARGET_LANG", "zh"))
-        except Exception:
-            pass
+            _run_transcribe_worker(
+                job,
+                video_path,
+                backend,
+                language,
+                whisper_model,
+                funasr_model,
+                device,
+            )
+        finally:
+            core.set_transcribing_video(None)
+            if temp_path and temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except Exception:
+                    pass
+            _schedule_next_transcribe()
 
-    # 解析 ASR 后端类名
-    asr_cls_name = _display_name_to_asr_cls(backend)
-    # 解析模型名
-    asr_model = ""
-    if "FunASR" in backend:
-        asr_model = funasr_model
-    else:
-        asr_model = whisper_model
-
-    ptask = PipelineTask(
-        task_id=job.job_id,
-        video_path=video_path,
-        asr_backend=asr_cls_name,
-        model_name=asr_model,
-        language=language,
-        device=device,
-        auto_translate=do_auto_translate,
-        translate_backend="SiliconFlowTranslate",
-        translate_model=translate_model_name,
-        translate_base_url=translate_base_url,
-        translate_api_key=translate_api_key,
-        target_lang=target_lang,
-        status_cb=_on_pipeline_status,
-        log_cb=_on_pipeline_log,
-        progress_cb=_on_pipeline_progress,
-    )
-
-    logger.info(f"任务 {job.job_id} 提交到 Pipeline, auto_translate={do_auto_translate}")
-    get_pipeline().submit(ptask)
+    core.set_transcribing_video(video_path)
+    _RUNTIME_THREAD = threading.Thread(target=runner, daemon=True)
+    _RUNTIME_THREAD.start()
     # 返回相对路径供前端显示
     display_path = ""
     if video_path:
@@ -4783,6 +4696,8 @@ def api_job_stop(job_id: str):
 
 @app.post("/api/jobs/{job_id}/translate")
 def api_job_translate(job_id: str, payload: dict[str, Any]):
+    global _RUNTIME_THREAD
+    logger.info(f"[translate] 收到翻译请求: job_id={job_id}, payload={payload}")
     job = _get_job(job_id)
     with _RUNTIME_LOCK:
         if job.running:
@@ -4796,6 +4711,7 @@ def api_job_translate(job_id: str, payload: dict[str, Any]):
     model = payload.get("online_model", "")
     target_lang = _normalize_lang_code(payload.get("target_lang", "zh"))
 
+    # 设置并行翻译线程数
     try:
         parallel_threads = int(payload.get("parallel_threads", 5))
     except (ValueError, TypeError):
@@ -4803,7 +4719,8 @@ def api_job_translate(job_id: str, payload: dict[str, Any]):
     from utils.translate import set_parallel_threads
     set_parallel_threads(parallel_threads)
 
-    threading.Thread(target=_run_translate_worker, args=(job, profile, model, target_lang), daemon=True).start()
+    _RUNTIME_THREAD = threading.Thread(target=_run_translate_worker, args=(job, profile, model, target_lang), daemon=True)
+    _RUNTIME_THREAD.start()
     return {"message": "translate started"}
 
 
@@ -4898,7 +4815,8 @@ def api_external_process(payload: dict[str, Any]):
     output_mode = str(payload.get("output_mode", "binary")).strip().lower() or "binary"
 
     with _RUNTIME_LOCK:
-        pass  # 允许并行处理
+        if _RUNTIME_JOB and _RUNTIME_JOB.running:
+            raise HTTPException(status_code=409, detail="已有任务运行中")
 
     media_path, subtitle_path = _resolve_external_input(payload, auto_subtitle_lang)
 

@@ -3,8 +3,11 @@
     "video2text": {
       "type": "stdio",
       "command": "uv",
-      "args": ["run", "python", "mcp_server.py"],
-      "cwd": "/home/lym/projects/video2text"
+      "args": ["run", "python", "src/mcp_server.py"],
+      "cwd": "/home/lym/projects/video2text",
+      "env": {
+        "VIDEO2TEXT_URL": "http://127.0.0.1:7881"
+      }
     }
   }
 }
