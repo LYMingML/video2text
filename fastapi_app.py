@@ -670,6 +670,9 @@ def _run_transcribe_worker(
         except Exception:
             pass
 
+        with _RUNTIME_LOCK:
+            job.done = True
+            job.running = False
         _set_job_progress(
             job,
             f"✅ 原文识别完成（100%）→ workspace/{job_dir.name}/（点击翻译并选择目标语言）",
@@ -679,9 +682,6 @@ def _run_transcribe_worker(
             step_label="识别完成",
         )
         job.plain_text = display_plain_text
-        with _RUNTIME_LOCK:
-            job.done = True
-            job.running = False
     except Exception as exc:
         with _RUNTIME_LOCK:
             job.failed = True
@@ -951,6 +951,9 @@ def _run_translate_worker(job: JobState, profile_name: str, model_name: str, tar
             save_plain(out_segments, str(job_dir / f"{file_prefix}.zh.txt"), normalize=False)
 
         job.zip_bundle = _build_all_bundle(job_dir, file_prefix)
+        with _RUNTIME_LOCK:
+            job.done = True
+            job.running = False
         _set_job_progress(
             job,
             f"✅ 翻译完成（100%，目标语言: {use_target_lang}）：workspace/{job.current_job}/",
@@ -959,9 +962,6 @@ def _run_translate_worker(job: JobState, profile_name: str, model_name: str, tar
             eta_seconds=0,
             step_label="翻译完成",
         )
-        with _RUNTIME_LOCK:
-            job.done = True
-            job.running = False
     except Exception as exc:
         with _RUNTIME_LOCK:
             job.failed = True
@@ -3456,7 +3456,7 @@ async function startTranslate(){
                 online_profile: document.getElementById('profileSel').value,
                 online_model: chosenModel,
                 target_lang: document.getElementById('targetLangSel').value || 'zh',
-                parallel_threads: parseInt(document.getElementById('parallelThreadSel')?.value || '5')
+                parallel_threads: document.getElementById('parallelThreadSel')?.value || '5'
         };
   await api('/api/jobs/'+currentJobId+'/translate', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
   startPoll();
@@ -3534,12 +3534,15 @@ async function handleJobUpdate(data){
         await refreshHistory(preferredWav, data.current_job || '');
         refreshQueueStatus();
 
-        // 兜底：优先用客户端 pendingAutoFlags，若丢失则用服务端标志
-        if(!pendingAutoFlags.translate && data.auto_translate){
-          pendingAutoFlags.translate = true;
-        }
-        if(!pendingAutoFlags.download && data.auto_download){
-          pendingAutoFlags.download = true;
+        // 兜底：仅在转录阶段恢复客户端丢失的标志，翻译阶段不恢复避免重复触发
+        const isTranscribeDone = !data.step_label || !data.step_label.includes('翻译');
+        if(isTranscribeDone){
+          if(!pendingAutoFlags.translate && data.auto_translate){
+            pendingAutoFlags.translate = true;
+          }
+          if(!pendingAutoFlags.download && data.auto_download){
+            pendingAutoFlags.download = true;
+          }
         }
         if(pendingAutoFlags.translate && !data.failed){
           pendingAutoFlags.translate = false;
@@ -3548,7 +3551,6 @@ async function handleJobUpdate(data){
             await startTranslate();
           }catch(e){
             console.error('自动翻译失败', e);
-            startPoll();
           }
         } else {
           _stopPoll();
@@ -4665,7 +4667,7 @@ def api_job_stop(job_id: str):
 
 
 @app.post("/api/jobs/{job_id}/translate")
-def api_job_translate(job_id: str, payload: dict[str, str]):
+def api_job_translate(job_id: str, payload: dict[str, Any]):
     global _RUNTIME_THREAD
     job = _get_job(job_id)
     with _RUNTIME_LOCK:
