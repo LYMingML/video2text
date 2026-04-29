@@ -1,8 +1,14 @@
 # video2text 设计文档
 
-**版本**: v0.5.0
+**版本**: v0.5.1
 
 ## 修复日志
+
+### v0.5.1
+- **run.sh 启动脚本**：支持 HTTP+HTTPS 双端口、后台模式、--status/--stop/--restart/--log 管理命令
+- **chunks 自动清理**：转录完成后 Pipeline 自动 `shutil.rmtree(chunks/)`
+- **fix**：`transcribe_logic.py` 快速路径 `chunk_dir` 未定义导致 NameError
+- **fix**：Dockerfile 移除不存在的 `video2text.service` COPY
 
 ### v0.5.0
 - **四阶段流水线集成**：Pipeline 引擎集成到 FastAPI，4 个独立队列 + 4 个守护线程

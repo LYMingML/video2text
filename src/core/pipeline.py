@@ -341,6 +341,12 @@ class Pipeline:
 
                 _log(task, f"[ASR] 原始片段数: {len(segments)}")
 
+                # 清理 chunks 目录
+                chunk_dir = Path(task.job_dir) / "chunks"
+                if chunk_dir.exists():
+                    shutil.rmtree(chunk_dir, ignore_errors=True)
+                    _log(task, "[CLEANUP] 已清理临时分片目录")
+
                 # 保存原文 SRT/TXT
                 _notify_progress(task, 0.85, "保存原文...")
                 self._save_original_outputs(task)

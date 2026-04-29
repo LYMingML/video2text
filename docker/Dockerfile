@@ -1,4 +1,4 @@
-# video2text GPU Dockerfile - v0.5.0
+# video2text GPU Dockerfile - v0.5.1
 # 基于 PyTorch 官方 runtime 镜像，单阶段构建
 # 预估大小：~6-7GB
 

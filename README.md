@@ -4,7 +4,7 @@ Video/audio to subtitle tool with triple ASR backends (VibeVoice, FunASR, faster
 
 **[中文文档](docs/README_zh.md)**
 
-**Version**: v0.5.0
+**Version**: v0.5.1
 
 ## Features
 
@@ -167,6 +167,12 @@ echo "PREFER_INTEL_GPU=1" >> .env
 ```
 
 ## Changelog
+
+### v0.5.1
+- feat: `run.sh` — comprehensive startup script (HTTP+HTTPS dual-port, --status/--stop/--log, background mode)
+- feat: Auto-cleanup chunk directories after transcription
+- fix: `transcribe_logic.py` fast-path NameError when `chunk_dir` undefined
+- fix: `docker/Dockerfile` removed missing `video2text.service` COPY
 
 ### v0.5.0
 - feat: 4-stage pipeline integrated into FastAPI — Download → Preprocess (WAV + chunking) → ASR (GPU) → Translate

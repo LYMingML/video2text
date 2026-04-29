@@ -4,7 +4,7 @@
 
 **[English Documentation](../README.md)**
 
-**版本**: v0.5.0
+**版本**: v0.5.1
 
 ## 功能特性
 
@@ -168,6 +168,12 @@ echo "PREFER_INTEL_GPU=1" >> .env
 ```
 
 ## 更新日志
+
+### v0.5.1
+- feat: `run.sh` 完善启动脚本（HTTP+HTTPS 双端口、--status/--stop/--log、后台模式）
+- feat: 转录完成后自动清理 chunks 临时目录
+- fix: `transcribe_logic.py` 快速路径 `chunk_dir` 未定义的 NameError
+- fix: `docker/Dockerfile` 移除不存在的 `video2text.service` COPY
 
 ### v0.5.0
 - feat: 四阶段流水线集成到 FastAPI — 下载 → 预处理（WAV + 分片）→ ASR（GPU）→ 翻译

@@ -83,6 +83,7 @@ def do_transcribe(
     lang_code = _parse_lang_code(language)
 
     # ── 快速路径：已有预处理结果，直接进入转录 ──
+    chunk_dir = None
     if pre_chunked_items is not None and pre_duration is not None:
         asr = get_asr_backend(backend_cls_name)
         if log_cb:
@@ -257,7 +258,7 @@ def do_transcribe(
             )
 
     # 7. 清理临时分片
-    if chunk_dir.exists():
+    if chunk_dir is not None and chunk_dir.exists():
         shutil.rmtree(chunk_dir, ignore_errors=True)
         if log_cb:
             log_cb("[CLEANUP] 已清理临时分片目录")
