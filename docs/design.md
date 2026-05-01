@@ -1,8 +1,17 @@
 # video2text 设计文档
 
-**版本**: v0.5.1
+**版本**: v0.6.0
 
 ## 修复日志
+
+### v0.6.0
+- 移除 `main.py`（2151 行），核心逻辑全部迁移到 `src/core/`
+- 移除遗留 `backend/` 目录，统一使用 `src/backends/` 插件注册表
+- `fastapi_app.py` 解除 `import main` 依赖，全部从 `src/core/` 直接导入
+- 移除 `scripts/main.sh`，`run.sh` 为唯一启动脚本
+- `_do_transcribe_stream` 生成器迁移到 `transcribe_logic.py`，使用统一后端注册表
+- 修复 `pyproject.toml` 构建配置适配 `src/` 布局
+- Dockerfile 改用 `run.sh` 替代 `main.sh`
 
 ### v0.5.1
 - **run.sh 启动脚本**：支持 HTTP+HTTPS 双端口、后台模式、--status/--stop/--restart/--log 管理命令
@@ -69,14 +78,15 @@
 ## 2. 核心架构
 
 - `fastapi_app.py`：Web 页面与 API、任务调度、URL 下载、文件下载
-- `main.py`：转录核心流程与工作目录管理
-- `backend/funasr_backend.py`：FunASR 推理封装
-- `backend/whisper_backend.py`：faster-whisper 推理封装
-- `utils/subtitle.py`：字幕清洗与 SRT/TXT 写入
-- `utils/online_models.py`：`.env` 与在线模型配置持久化
-- `main.sh`：本机启动脚本（默认 `0.0.0.0`）
+- `src/core/config.py`：全局配置与常量
+- `src/core/workspace.py`：工作目录管理、文件指纹、任务元数据
+- `src/core/transcribe_logic.py`：转录编排（含生成器版本）
+- `src/core/pipeline.py`：四阶段流水线引擎
+- `src/backends/`：插件化 ASR/翻译后端（注册表模式）
+- `src/utils/subtitle.py`：字幕清洗与 SRT/TXT 写入
+- `src/utils/online_models.py`：`.env` 与在线模型配置持久化
+- `run.sh`：启动脚本（start/stop/restart/status/log）
 - `Dockerfile`：Docker 镜像（支持 GPU 和 CPU，无 GPU 时自动回退）
-- `docker-compose.yml`：Docker Compose 编排
 
 ## 3. 关键能力
 

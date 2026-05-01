@@ -4,7 +4,7 @@ Video/audio to subtitle tool with triple ASR backends (VibeVoice, FunASR, faster
 
 **[中文文档](docs/README_zh.md)**
 
-**Version**: v0.5.1
+**Version**: v0.6.0
 
 ## Features
 
@@ -121,28 +121,32 @@ Input types: `base64`, `url`, `history`
 ```
 video2text/
 ├── fastapi_app.py          # FastAPI app + embedded HTML/JS frontend
-├── main.py                 # Core transcription orchestration
-├── main.sh                 # Launcher script
-├── backends/               # Pluggable ASR/translate backends
-│   ├── base_asr.py         # ASR abstract base class
-│   ├── base_translate.py   # Translate abstract base class
-│   ├── vibevoice_asr.py    # VibeVoice ASR (default, speaker diarization)
-│   ├── funasr_asr.py       # FunASR Paraformer backend
-│   ├── whisper_asr.py      # faster-whisper backend
-│   └── siliconflow_translate.py  # OpenAI-compatible translation
-├── core/                   # Extracted business logic
-│   ├── config.py           # Global config & constants
-│   ├── workspace.py        # Workspace & file management
-│   ├── transcribe_logic.py # Transcription orchestration
-│   └── pipeline.py         # Pipeline engine
-├── utils/
-│   ├── audio.py            # FFmpeg audio extraction
-│   ├── subtitle.py         # SRT/VTT/TXT subtitle I/O
-│   ├── translate.py         # Parallel subtitle translation
-│   ├── online_models.py    # Translation model profile management
-│   └── xhs_downloader.py   # Xiaohongshu watermark-free download
+├── run.sh                  # Launcher script (start/stop/restart/status/log)
+├── src/
+│   ├── backends/           # Pluggable ASR/translate backends
+│   │   ├── base_asr.py     # ASR abstract base class
+│   │   ├── base_translate.py # Translate abstract base class
+│   │   ├── vibevoice_asr.py  # VibeVoice ASR (default, speaker diarization)
+│   │   ├── funasr_asr.py   # FunASR Paraformer backend
+│   │   ├── whisper_asr.py  # faster-whisper backend
+│   │   └── siliconflow_translate.py  # OpenAI-compatible translation
+│   ├── core/               # Business logic
+│   │   ├── config.py       # Global config & constants
+│   │   ├── workspace.py    # Workspace & file management
+│   │   ├── transcribe_logic.py # Transcription orchestration
+│   │   └── pipeline.py     # 4-stage pipeline engine
+│   ├── utils/
+│   │   ├── audio.py        # FFmpeg audio extraction
+│   │   ├── subtitle.py     # SRT/VTT/TXT subtitle I/O
+│   │   ├── translate.py    # Parallel subtitle translation
+│   │   ├── online_models.py # Translation model profile management
+│   │   └── xhs_downloader.py # Xiaohongshu watermark-free download
+│   └── mcp_server.py       # MCP Server (HTTP client, no GPU work)
 ├── scripts/
 │   └── download_models.py  # Model pre-download script
+├── docker/
+│   ├── Dockerfile          # GPU Docker image (PyTorch + CUDA)
+│   └── docker-entrypoint.sh
 ├── docs/                   # Documentation
 └── workspace/              # Task output directory
 ```
@@ -197,7 +201,17 @@ echo "PREFER_INTEL_GPU=1" >> .env
 - feat: SSE replaces 1s polling — event-driven UI updates with 1% progress threshold, auto-fallback to polling on failure
 - feat: "直接保存" checkbox — fetch+blob download to browser default path without dialog
 
-### v0.4.1
+### v0.6.0
+- refactor: Remove `main.py` (2151 lines) — all core logic migrated to `src/core/`
+- refactor: Remove legacy `backend/` directory — unified under `src/backends/` plugin registry
+- refactor: `fastapi_app.py` decoupled from `main.py`, all imports from `src/core/` directly
+- refactor: Remove `scripts/main.sh` — `run.sh` is the sole launcher
+- feat: `_do_transcribe_stream` generator migrated to `transcribe_logic.py` with unified backend registry
+- fix: `pyproject.toml` build config for `src/` layout
+- fix: Dockerfile uses `run.sh` instead of `main.sh`
+- chore: Remove 8MB test artifact from git tracking
+
+### v0.5.1
 - fix: yt-dlp compatibility — add `--remote-components ejs:github` and auto-detect JS runtime (deno/node/bun)
 - fix: plain text output now merges lines into paragraphs by time gap (readability improvement)
 - fix: move mcp, httpx, faster-whisper, stable-ts from optional to core dependencies

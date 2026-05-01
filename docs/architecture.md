@@ -1,6 +1,6 @@
 # video2text 项目架构文档
 
-> **版本**: v0.5.1 | **语言**: Python 3.10+ | **许可**: MIT
+> **版本**: v0.6.0 | **语言**: Python 3.10+ | **许可**: MIT
 
 ---
 
@@ -35,9 +35,8 @@ video2text 是一个视频/音频转字幕工具，核心功能：
 - **实时推送**：SSE（Server-Sent Events）替代轮询，事件驱动 UI 更新
 - **MCP 集成**：可通过 MCP 协议被 Claude 等 LLM 调用
 
-提供两套前端：
-- **FastAPI**（`fastapi_app.py`）：内嵌 HTML/JS 单页应用，推荐使用
-- **Gradio**（`main.py`）：备选 Web UI
+提供前端：
+- **FastAPI**（`fastapi_app.py`）：内嵌 HTML/JS 单页应用
 
 ---
 
@@ -45,39 +44,29 @@ video2text 是一个视频/音频转字幕工具，核心功能：
 
 ```
 video2text/
-├── fastapi_app.py              # FastAPI 应用 + 内嵌 HTML/JS（主前端）
+├── fastapi_app.py              # FastAPI 应用 + 内嵌 HTML/JS（唯一前端）
 │                                # ~4900 行，包含 Tesla P4 兼容性补丁
-├── main.py                     # Gradio UI（备选前端）+ 遗留核心编排逻辑
-│                                # ~2150 行，v0.4.x 后核心逻辑已迁移到 core/
-├── main.sh                     # 启动脚本（HTTP/HTTPS 双端口）
-├── install.sh                  # 安装脚本（系统依赖 + Python 环境）
-├── mcp_server.py               # MCP Server（纯 HTTP 客户端，不做 GPU 工作）
-│                                # ~900 行，暴露全部功能为 MCP Tools
-├── .env                        # 运行时配置（API 密钥、模型选择等）
+├── run.sh                      # 启动脚本 (start/stop/restart/status/log)
 ├── .env.example                # 配置模板
 ├── pyproject.toml              # 项目元数据与依赖声明
 │
-├── core/                       # 核心业务逻辑（去 Gradio 依赖）
-│   ├── __init__.py            # 模块说明
-│   ├── config.py              # 全局常量、语言工具、GPU 检测
-│   ├── workspace.py            # 工作目录管理、文件指纹、任务元数据
-│   ├── pipeline.py             # 四阶段流水线引擎（queue.Queue + 守护线程）
-│   └── transcribe_logic.py     # 转录编排逻辑（音频提取、分片、转录）
-│
-├── backends/                   # 插件化 ASR/翻译后端（@register_* 装饰器）
-│   ├── __init__.py            # 后端注册表 + 自动导入
-│   ├── base_asr.py            # ASR 抽象基类 ASRBackend
-│   ├── base_translate.py      # 翻译抽象基类 TranslateBackend
-│   ├── funasr_asr.py         # FunASR Paraformer 实现
-│   ├── whisper_asr.py         # faster-whisper CTranslate2 实现
-│   ├── vibevoice_asr.py       # Microsoft VibeVoice ASR 实现
-│   └── siliconflow_translate.py # SiliconFlow / Ollama 翻译实现
-│
-├── backend/                    # 遗留后端（旧版 v0.3.x，仍可用）
-│   ├── funasr_backend.py
-│   └── whisper_backend.py
-│
-├── utils/                      # 工具模块
+├── src/
+│   ├── core/                   # 核心业务逻辑
+│   │   ├── config.py           # 全局常量、语言工具、GPU 检测
+│   │   ├── workspace.py        # 工作目录管理、文件指纹、任务元数据
+│   │   ├── pipeline.py         # 四阶段流水线引擎（queue.Queue + 守护线程）
+│   │   └── transcribe_logic.py # 转录编排逻辑（音频提取、分片、转录）
+│   │
+│   ├── backends/               # 插件化 ASR/翻译后端（@register_* 装饰器）
+│   │   ├── __init__.py         # 后端注册表 + 自动导入
+│   │   ├── base_asr.py         # ASR 抽象基类 ASRBackend
+│   │   ├── base_translate.py   # 翻译抽象基类 TranslateBackend
+│   │   ├── funasr_asr.py       # FunASR Paraformer 实现
+│   │   ├── whisper_asr.py      # faster-whisper CTranslate2 实现
+│   │   ├── vibevoice_asr.py    # Microsoft VibeVoice ASR 实现
+│   │   └── siliconflow_translate.py # SiliconFlow / Ollama 翻译实现
+│   │
+│   ├── utils/                  # 工具模块
 │   ├── __init__.py
 │   ├── audio.py               # FFmpeg 音频提取与分片
 │   ├── subtitle.py            # SRT/TXT 字幕读写与处理

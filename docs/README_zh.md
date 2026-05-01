@@ -4,7 +4,7 @@
 
 **[English Documentation](../README.md)**
 
-**版本**: v0.5.1
+**版本**: v0.6.0
 
 ## 功能特性
 
@@ -121,29 +121,33 @@ curl -X POST "http://127.0.0.1:7881/api/external/process" \
 ```
 video2text/
 ├── fastapi_app.py          # FastAPI 应用 + 内嵌 HTML/JS 前端（唯一前端）
-├── main.py                 # 核心转录编排逻辑
-├── main.sh                 # 启动脚本
-├── backends/               # 插件化 ASR/翻译后端
-│   ├── __init__.py         # 注册表 + 工厂函数
-│   ├── base_asr.py         # ASR 抽象基类
-│   ├── base_translate.py   # 翻译抽象基类
-│   ├── vibevoice_asr.py    # VibeVoice ASR 后端（默认，说话人分离）
-│   ├── funasr_asr.py       # FunASR Paraformer 后端
-│   ├── whisper_asr.py      # faster-whisper 后端
-│   └── siliconflow_translate.py  # OpenAI 兼容翻译后端
-├── core/                   # 从 main.py 提取的业务逻辑
-│   ├── config.py           # 全局配置与常量
-│   ├── workspace.py        # 工作目录管理
-│   ├── transcribe_logic.py # 转录编排
-│   └── pipeline.py         # 四阶段流水线引擎
-├── utils/
-│   ├── audio.py            # FFmpeg 音频提取与分片
-│   ├── subtitle.py         # SRT/VTT/TXT 字幕读写
-│   ├── translate.py         # 并行字幕翻译
-│   ├── online_models.py    # 翻译模型配置组管理
-│   └── xhs_downloader.py   # 小红书无水印下载
+├── run.sh                  # 启动脚本 (start/stop/restart/status/log)
+├── src/
+│   ├── backends/           # 插件化 ASR/翻译后端
+│   │   ├── __init__.py     # 注册表 + 工厂函数
+│   │   ├── base_asr.py     # ASR 抽象基类
+│   │   ├── base_translate.py # 翻译抽象基类
+│   │   ├── vibevoice_asr.py  # VibeVoice ASR 后端（默认，说话人分离）
+│   │   ├── funasr_asr.py   # FunASR Paraformer 后端
+│   │   ├── whisper_asr.py  # faster-whisper 后端
+│   │   └── siliconflow_translate.py  # OpenAI 兼容翻译后端
+│   ├── core/               # 业务逻辑
+│   │   ├── config.py       # 全局配置与常量
+│   │   ├── workspace.py    # 工作目录管理
+│   │   ├── transcribe_logic.py # 转录编排（含生成器版本）
+│   │   └── pipeline.py     # 四阶段流水线引擎
+│   ├── utils/
+│   │   ├── audio.py        # FFmpeg 音频提取与分片
+│   │   ├── subtitle.py     # SRT/VTT/TXT 字幕读写
+│   │   ├── translate.py    # 并行字幕翻译
+│   │   ├── online_models.py # 翻译模型配置组管理
+│   │   └── xhs_downloader.py # 小红书无水印下载
+│   └── mcp_server.py       # MCP Server（HTTP 客户端，不做 GPU 计算）
 ├── scripts/
 │   └── download_models.py  # 模型预下载脚本
+├── docker/
+│   ├── Dockerfile          # GPU Docker 镜像（PyTorch + CUDA）
+│   └── docker-entrypoint.sh
 ├── docs/                   # 文档
 └── workspace/              # 任务输出目录
 ```
@@ -203,7 +207,17 @@ echo "PREFER_INTEL_GPU=1" >> .env
 - fix: 纯文本输出改为按时间间隔分段合并，提升可读性
 - fix: 将 mcp、httpx、faster-whisper、stable-ts 从可选依赖移入核心依赖
 
-### v0.4.0
+### v0.6.0
+- refactor: 移除 `main.py`（2151 行）— 核心逻辑全部迁移到 `src/core/`
+- refactor: 移除遗留 `backend/` 目录 — 统一使用 `src/backends/` 插件注册表
+- refactor: `fastapi_app.py` 解除 `import main` 依赖，全部从 `src/core/` 直接导入
+- refactor: 移除 `scripts/main.sh` — `run.sh` 为唯一启动脚本
+- feat: `_do_transcribe_stream` 生成器迁移到 `transcribe_logic.py`，使用统一后端注册表
+- fix: `pyproject.toml` 构建配置适配 `src/` 布局
+- fix: Dockerfile 改用 `run.sh` 替代 `main.sh`
+- chore: 从 git 追踪中移除 8MB 测试产物
+
+### v0.5.1
 - feat: VibeVoice ASR 后端（7B/9B 模型，说话人分离，4-bit/8-bit 量化，默认后端）
 - feat: 插件化后端架构（`backends/` 目录，抽象基类 + 注册表模式）
 - feat: `core/` 模块从 main.py 提取（config、workspace、transcribe_logic、pipeline）
