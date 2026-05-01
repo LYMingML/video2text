@@ -56,7 +56,7 @@ cd video2text
 bash install.sh
 
 # 启动
-./main.sh auto
+bash run.sh start
 ```
 
 注册为 systemd 服务：

@@ -56,7 +56,7 @@ cd video2text
 bash install.sh
 
 # Start
-./main.sh auto
+bash run.sh start
 ```
 
 Register as systemd service:
