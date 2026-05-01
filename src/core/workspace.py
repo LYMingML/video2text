@@ -560,3 +560,42 @@ def _workspace_history_text(max_jobs: int = 30) -> str:
         lines.append(f"- **{job_dir.name}/** ({size_mb:.2f} MB)")
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# 输入路径解析
+# ---------------------------------------------------------------------------
+
+def _resolve_input_path(video_file, history_video: str | None) -> str | None:
+    """优先使用新上传文件；若未上传则使用历史文件选择。"""
+    if video_file is not None:
+        return video_file if isinstance(video_file, str) else video_file.name
+
+    if not history_video:
+        return None
+
+    p = Path(history_video)
+    resolved = p if p.is_absolute() else (WORKSPACE_DIR.parent / p)
+    return str(resolved)
+
+
+# ---------------------------------------------------------------------------
+# 纯文本输出
+# ---------------------------------------------------------------------------
+
+def _finalize_plain_text_outputs(
+    job_dir: Path,
+    file_prefix: str,
+    cleaned_segments: list[tuple[float, float, str]],
+    plain_text: str,
+) -> tuple[str, str, list[str]]:
+    from utils.subtitle import save_plain, segments_to_plain
+
+    raw_text = plain_text or segments_to_plain(cleaned_segments, normalize=False)
+
+    raw_txt_path = save_plain(
+        cleaned_segments,
+        str(job_dir / f"{file_prefix}.txt"),
+        normalize=False,
+    )
+    return raw_text, raw_text, [Path(raw_txt_path).name]

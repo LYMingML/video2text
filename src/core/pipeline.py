@@ -24,6 +24,7 @@ from core.config import (
     _pick_funasr_model_for_language,
 )
 from core.workspace import (
+    OUTPUT_LANG_SUFFIXES,
     _cleanup_job_source_media,
     _resolve_job_dir_for_input,
     _save_task_meta,
@@ -37,8 +38,6 @@ logger = logging.getLogger("video2text.pipeline")
 # ---------------------------------------------------------------------------
 # 任务数据
 # ---------------------------------------------------------------------------
-
-OUTPUT_LANG_SUFFIXES = {"zh", "en", "ja", "ko", "es", "fr", "de", "ru"}
 
 
 @dataclass

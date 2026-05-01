@@ -39,11 +39,10 @@ COPY scripts/download_models.py /tmp/
 RUN python /tmp/download_models.py && rm -rf /tmp/download_models.py
 
 # 5. 应用代码（变更最频繁，放在最后以最大化缓存利用）
-COPY fastapi_app.py main.py .env.example ./
-COPY scripts/main.sh /app/main.sh
+COPY fastapi_app.py .env.example run.sh ./
 COPY docker/docker-entrypoint.sh /app/docker-entrypoint.sh
 
-RUN chmod +x /app/docker-entrypoint.sh /app/main.sh
+RUN chmod +x /app/docker-entrypoint.sh /app/run.sh
 
 EXPOSE 7881
 

@@ -100,9 +100,8 @@ from core.workspace import (
     _stage_source_media_to_temp_video,
     _unique_file_path,
 )
-# main.py 中仍有部分未迁移函数（_do_transcribe_stream, _finalize_plain_text_outputs 等），
-# 保留 import 以兼容；长期目标是将这些也迁移到 core/ 后移除此行。
-import main as core
+from core.workspace import _finalize_plain_text_outputs, _resolve_input_path
+from core.transcribe_logic import _do_transcribe_stream
 
 from utils.online_models import delete_profile, load_app_settings, load_profiles, save_app_settings, save_profiles, upsert_profile
 from utils.subtitle import collect_plain_text, normalize_segments_timeline, save_plain, save_srt, segments_to_plain
@@ -214,13 +213,13 @@ def _decode_media_base64_to_temp(media_base64: str, filename: str) -> str:
         raise HTTPException(status_code=400, detail="media_base64 解码后为空")
 
     name = Path(filename or "media.mp4").name
-    if not core._is_supported_media_path(name):
+    if not _is_supported_media_path(name):
         raise HTTPException(status_code=400, detail="filename 扩展名不受支持")
 
-    core.TEMP_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
-    save_path = core._unique_file_path(core.TEMP_VIDEO_DIR, name)
+    TEMP_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+    save_path = _unique_file_path(TEMP_VIDEO_DIR, name)
     save_path.write_bytes(binary)
-    core._prune_temp_video_dir()
+    _prune_temp_video_dir()
     return str(save_path)
 
 
@@ -228,11 +227,11 @@ def _collect_job_outputs(job: JobState) -> tuple[Path, list[str]]:
     if not job.current_job:
         raise HTTPException(status_code=500, detail="任务未生成输出目录")
 
-    job_dir = core.WORKSPACE_DIR / job.current_job
+    job_dir = WORKSPACE_DIR / job.current_job
     if not job_dir.exists() or not job_dir.is_dir():
         raise HTTPException(status_code=500, detail="输出目录不存在")
 
-    file_prefix = core._resolve_file_prefix(job_dir, job.current_prefix)
+    file_prefix = _resolve_file_prefix(job_dir, job.current_prefix)
     if not file_prefix:
         raise HTTPException(status_code=500, detail="无法解析输出文件前缀")
 
@@ -263,13 +262,13 @@ def _resolve_external_input(payload: dict[str, Any], auto_subtitle_lang: str) ->
 
     if source_type == "history":
         history_video = str(payload.get("history_video", "")).strip()
-        media_path = core._resolve_input_path(None, history_video) or ""
+        media_path = _resolve_input_path(None, history_video) or ""
         if not media_path:
             raise HTTPException(status_code=400, detail="history_video 无效")
         media = Path(media_path)
         if not media.exists() or not media.is_file():
             raise HTTPException(status_code=400, detail="history_video 对应文件不存在")
-        if not core._is_supported_media_path(media_path):
+        if not _is_supported_media_path(media_path):
             raise HTTPException(status_code=400, detail="history_video 不是受支持媒体类型")
         return media_path, None
 
@@ -281,7 +280,7 @@ def _resolve_external_input(payload: dict[str, Any], auto_subtitle_lang: str) ->
         filepath = str(dl.get("filepath", "")).strip()
         if not filepath:
             raise HTTPException(status_code=500, detail="URL 下载未返回文件路径")
-        media_path = core._resolve_input_path(None, filepath) or ""
+        media_path = _resolve_input_path(None, filepath) or ""
         if not media_path:
             raise HTTPException(status_code=500, detail="URL 下载后的媒体文件无效")
         if dl.get("auto_subtitle") and dl.get("subtitle_path"):
@@ -409,10 +408,10 @@ def _schedule_next_transcribe():
         try:
             _run_transcribe_worker(next_job, video_path, backend, language, whisper_model, funasr_model, device)
         finally:
-            core.set_transcribing_video(None)
+            set_transcribing_video(None)
             _schedule_next_transcribe()
 
-    core.set_transcribing_video(video_path)
+    set_transcribing_video(video_path)
     _RUNTIME_THREAD = threading.Thread(target=runner, daemon=True)
     _RUNTIME_THREAD.start()
 
@@ -553,7 +552,7 @@ def _cleanup_old_text_files():
     _TEXT_EXTS = {".srt", ".txt", ".vtt", ".wav"}
     cutoff = time.time() - 86400  # 1 day
     cleaned = 0
-    for folder in core.WORKSPACE_DIR.iterdir():
+    for folder in WORKSPACE_DIR.iterdir():
         if not folder.is_dir():
             continue
         for p in list(folder.iterdir()):
@@ -576,8 +575,8 @@ def _resolve_workspace_folder(folder_name: str) -> Path:
     if not name:
         raise HTTPException(status_code=400, detail="folder_name required")
 
-    root = core.WORKSPACE_DIR.resolve()
-    target = (core.WORKSPACE_DIR / name).resolve()
+    root = WORKSPACE_DIR.resolve()
+    target = (WORKSPACE_DIR / name).resolve()
     if root not in target.parents:
         raise HTTPException(status_code=400, detail="invalid folder")
     if not target.exists() or not target.is_dir():
@@ -596,13 +595,13 @@ def _run_transcribe_worker(
 ):
     t0 = time.time()
     try:
-        core.STOP_EVENT.clear()
+        STOP_EVENT.clear()
         p = Path(video_path)
         if not p.exists():
             raise RuntimeError(f"输入文件不存在: {video_path}")
 
         # 统一由核心逻辑决定任务目录，确保 job_dir 在后续流程中始终已初始化。
-        job_dir = core._resolve_job_dir_for_input(video_path)
+        job_dir = _resolve_job_dir_for_input(video_path)
         job_dir.mkdir(parents=True, exist_ok=True)
         orig_name = p.name
         file_prefix = p.stem
@@ -613,7 +612,7 @@ def _run_transcribe_worker(
                     old.unlink()
                 except OSError:
                     pass
-        core._cleanup_job_source_media(job_dir)
+        _cleanup_job_source_media(job_dir)
 
         job.current_job = job_dir.name
         job.current_prefix = file_prefix
@@ -621,7 +620,7 @@ def _run_transcribe_worker(
         job.add_log(f"[JOB] workspace/{job_dir.name}")
 
         segments: list[tuple[float, float, str]] = []
-        for status, partial in core._do_transcribe_stream(
+        for status, partial in _do_transcribe_stream(
             video_path,
             backend,
             language,
@@ -636,22 +635,22 @@ def _run_transcribe_worker(
             _set_job_progress(job, status, t0)
             job.plain_text = collect_plain_text(segments)
 
-        if core.STOP_EVENT.is_set():
+        if STOP_EVENT.is_set():
             _set_job_progress(job, "🛑 已停止（未生成字幕文件）", t0, progress_pct=0, eta_seconds=0, step_label="已停止")
             with _RUNTIME_LOCK:
                 job.done = True
                 job.running = False
             return
 
-        lang_code = core._parse_lang_code(language)
+        lang_code = _parse_lang_code(language)
         plain_text = collect_plain_text(segments)
         cleaned_segments = normalize_segments_timeline(segments)
         if not cleaned_segments:
             raise RuntimeError("未识别到有效字幕")
 
-        is_non_zh = lang_code in {"en", "ja", "ko", "es"} or core._looks_non_chinese_text(plain_text)
-        source_lang = core._guess_source_lang(lang_code, plain_text) if is_non_zh else "zh"
-        core._save_task_meta(
+        is_non_zh = lang_code in {"en", "ja", "ko", "es"} or _looks_non_chinese_text(plain_text)
+        source_lang = _guess_source_lang(lang_code, plain_text) if is_non_zh else "zh"
+        _save_task_meta(
             job_dir,
             {
                 "file_prefix": file_prefix,
@@ -664,7 +663,7 @@ def _run_transcribe_worker(
         plain_text = plain_text or segments_to_plain(cleaned_segments, normalize=False)
         save_srt(cleaned_segments, str(job_dir / f"{file_prefix}.srt"), normalize=False)
 
-        _, display_plain_text, written_text_files = core._finalize_plain_text_outputs(
+        _, display_plain_text, written_text_files = _finalize_plain_text_outputs(
             job_dir,
             file_prefix,
             cleaned_segments,
@@ -825,7 +824,7 @@ def _run_subtitle_import_worker(job: JobState, media_path: str, subtitle_path: s
         if not subtitle.exists():
             raise RuntimeError(f"字幕文件不存在: {subtitle_path}")
 
-        job_dir = core._resolve_job_dir_for_input(str(media))
+        job_dir = _resolve_job_dir_for_input(str(media))
         job_dir.mkdir(parents=True, exist_ok=True)
         file_prefix = media.stem
 
@@ -840,7 +839,7 @@ def _run_subtitle_import_worker(job: JobState, media_path: str, subtitle_path: s
         ext = subtitle.suffix.lower()
         if ext == ".srt":
             shutil.copy2(subtitle, target_srt)
-            segments = core._parse_srt_segments(target_srt)
+            segments = _parse_srt_segments(target_srt)
         elif ext == ".vtt":
             segments = _parse_webvtt_segments(subtitle)
             save_srt(segments, str(target_srt), normalize=True)
@@ -855,8 +854,8 @@ def _run_subtitle_import_worker(job: JobState, media_path: str, subtitle_path: s
         save_plain(cleaned_segments, str(job_dir / f"{file_prefix}.txt"), normalize=False)
 
         lang_code = "auto"
-        source_lang = core._guess_source_lang(lang_code, plain_text)
-        core._save_task_meta(
+        source_lang = _guess_source_lang(lang_code, plain_text)
+        _save_task_meta(
             job_dir,
             {
                 "file_prefix": file_prefix,
@@ -898,14 +897,14 @@ def _run_translate_worker(job: JobState, profile_name: str, model_name: str, tar
         if not job.current_job:
             raise RuntimeError("当前任务不存在")
 
-        job_dir = core.WORKSPACE_DIR / job.current_job
-        file_prefix = core._resolve_file_prefix(job_dir, job.current_prefix)
+        job_dir = WORKSPACE_DIR / job.current_job
+        file_prefix = _resolve_file_prefix(job_dir, job.current_prefix)
         if not file_prefix:
             raise RuntimeError("未找到原文字幕")
 
         orig_srt = job_dir / f"{file_prefix}.srt"
 
-        segments = core._parse_srt_segments(orig_srt)
+        segments = _parse_srt_segments(orig_srt)
         if not segments:
             raise RuntimeError("原文字幕为空")
 
@@ -916,7 +915,7 @@ def _run_translate_worker(job: JobState, profile_name: str, model_name: str, tar
         use_model = (model_name or str(profile.get("default_model", "")).strip()).strip()
         use_target_lang = _normalize_lang_code(target_lang)
 
-        meta = core._load_task_meta(job_dir)
+        meta = _load_task_meta(job_dir)
         source_lang = str(meta.get("source_lang") or "auto")
 
         total = len(segments)
@@ -3679,9 +3678,9 @@ function initDragZones() {
 
 @app.get("/api/history")
 def api_history():
-    folders_meta = core._list_job_folders_meta()
+    folders_meta = _list_job_folders_meta()
     return {
-        "videos": core._list_uploaded_videos(),
+        "videos": _list_uploaded_videos(),
         "folders": [f["name"] for f in folders_meta],
         "folders_meta": folders_meta,
     }
@@ -3690,7 +3689,7 @@ def api_history():
 @app.post("/api/folders/delete")
 def api_delete_folder(payload: dict[str, str]):
     name = payload.get("folder_name", "")
-    status, *_ = core._delete_job_folder(name)
+    status, *_ = _delete_job_folder(name)
     return {"message": status}
 
 
@@ -3708,7 +3707,7 @@ def api_delete_folders_batch(payload: dict):
         if not isinstance(name, str) or not name.strip():
             continue
         try:
-            status, *_ = core._delete_job_folder(name.strip())
+            status, *_ = _delete_job_folder(name.strip())
             # 检查删除成功的多种标识
             if "成功" in status or "已删除" in status or "deleted" in status.lower():
                 deleted += 1
@@ -3841,7 +3840,7 @@ def api_folder_translate(payload: dict[str, str]):
         raise HTTPException(status_code=400, detail="folder_name 不能为空")
 
     job_dir = _resolve_workspace_folder(folder_name)
-    file_prefix = core._resolve_file_prefix(job_dir, None)
+    file_prefix = _resolve_file_prefix(job_dir, None)
     if not file_prefix:
         raise HTTPException(status_code=400, detail="未找到原文字幕文件")
 
@@ -3895,7 +3894,7 @@ def api_all_output_files():
     _cleanup_old_text_files()
     _OUTPUT_EXTS = {".zip", ".srt", ".txt", ".wav", ".vtt"}
     all_entries = []
-    for folder in sorted(core.WORKSPACE_DIR.iterdir(), key=lambda x: x.name.lower()):
+    for folder in sorted(WORKSPACE_DIR.iterdir(), key=lambda x: x.name.lower()):
         if not folder.is_dir():
             continue
         for p in sorted(folder.iterdir(), key=lambda x: x.name.lower()):
@@ -4000,7 +3999,7 @@ def api_download_output_files(payload: dict):
 def api_get_temp_file_settings():
     """获取临时文件保留数量设置"""
     return {
-        "temp_video_keep_count": core.TEMP_VIDEO_KEEP_COUNT,
+        "temp_video_keep_count": TEMP_VIDEO_KEEP_COUNT,
     }
 
 
@@ -4017,7 +4016,7 @@ def api_set_temp_file_settings(payload: dict):
                 video_count = 1
             elif video_count > 100:
                 video_count = 100
-            core.TEMP_VIDEO_KEEP_COUNT = video_count
+            TEMP_VIDEO_KEEP_COUNT = video_count
             os.environ["TEMP_VIDEO_KEEP_COUNT"] = str(video_count)
             messages.append(f"临时视频保留 {video_count} 个")
         except (ValueError, TypeError):
@@ -4051,7 +4050,7 @@ def api_set_temp_file_settings(payload: dict):
 
     return {
         "message": " | ".join(messages) if messages else "已保存",
-        "temp_video_keep_count": core.TEMP_VIDEO_KEEP_COUNT,
+        "temp_video_keep_count": TEMP_VIDEO_KEEP_COUNT,
     }
 
 
@@ -4237,7 +4236,7 @@ def api_download_url(payload: dict):
 def _download_xiaohongshu(url: str) -> dict:
     """使用 XHS-Downloader 下载小红书视频"""
     project_root = Path(__file__).resolve().parent
-    core.TEMP_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+    TEMP_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 
     # 检查 XHS-Downloader API 服务是否可用
     client = get_xhs_client()
@@ -4249,7 +4248,7 @@ def _download_xiaohongshu(url: str) -> dict:
         )
 
     # 下载视频
-    result = download_xhs_video(url, output_dir=core.TEMP_VIDEO_DIR, timeout=120)
+    result = download_xhs_video(url, output_dir=TEMP_VIDEO_DIR, timeout=120)
 
     if not result.success:
         raise HTTPException(
@@ -4258,7 +4257,7 @@ def _download_xiaohongshu(url: str) -> dict:
         )
 
     # 清理临时目录
-    core._prune_temp_video_dir()
+    _prune_temp_video_dir()
 
     media_path = Path(result.file_path)
     return {
@@ -4371,8 +4370,8 @@ def _download_with_ytdlp(url: str, payload: dict) -> dict:
 
     def _title_to_dir(title: str) -> Path:
         safe = re.sub(r'[/\x00]', '', title).strip()[:120] or "media"
-        core.TEMP_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
-        return core.TEMP_VIDEO_DIR / f"{safe}.%(id)s.%(ext)s"
+        TEMP_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+        return TEMP_VIDEO_DIR / f"{safe}.%(id)s.%(ext)s"
 
     # 尝试顺序：WSL2 下 Firefox 优先；否则按原顺序
     if _wsl_ff_profile:
@@ -4401,7 +4400,7 @@ def _download_with_ytdlp(url: str, payload: dict) -> dict:
         if rc == 0:
             fp = _extract_path(out)
             if fp and Path(fp).exists():
-                core._prune_temp_video_dir()
+                _prune_temp_video_dir()
                 media_path = Path(fp)
                 subtitle_path = _pick_downloaded_subtitle(media_path)
                 payload = {
@@ -4478,7 +4477,7 @@ def api_job_import_subtitle(payload: dict[str, str]):
     if not history_video or not subtitle_path_input:
         raise HTTPException(status_code=400, detail="history_video 和 subtitle_path 必填")
 
-    media_path = core._resolve_input_path(None, history_video) or ""
+    media_path = _resolve_input_path(None, history_video) or ""
     if not media_path:
         raise HTTPException(status_code=400, detail="无效的媒体路径")
 
@@ -4527,16 +4526,16 @@ def api_transcribe_start(
     temp_path: Path | None = None
     if video_file is not None and video_file.filename:
         orig_name = Path(video_file.filename).name
-        if not core._is_supported_media_path(orig_name):
+        if not _is_supported_media_path(orig_name):
             raise HTTPException(status_code=400, detail="仅支持视频或音频文件上传")
-        core.TEMP_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+        TEMP_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 
-        temp_upload_path = core.TEMP_VIDEO_DIR / f".upload_{uuid.uuid4().hex}"
+        temp_upload_path = TEMP_VIDEO_DIR / f".upload_{uuid.uuid4().hex}"
         try:
             with temp_upload_path.open("wb") as f:
                 shutil.copyfileobj(video_file.file, f)
 
-            duplicate = core._find_duplicate_file(temp_upload_path, core.TEMP_VIDEO_DIR)
+            duplicate = _find_duplicate_file(temp_upload_path, TEMP_VIDEO_DIR)
             if duplicate:
                 temp_upload_path.unlink()
                 try:
@@ -4545,17 +4544,17 @@ def api_transcribe_start(
                     pass
                 video_path = str(duplicate)
             else:
-                save_path = core._unique_file_path(core.TEMP_VIDEO_DIR, orig_name)
+                save_path = _unique_file_path(TEMP_VIDEO_DIR, orig_name)
                 temp_upload_path.rename(save_path)
                 video_path = str(save_path)
         finally:
             if temp_upload_path.exists():
                 temp_upload_path.unlink()
 
-        core._prune_temp_video_dir()
+        _prune_temp_video_dir()
     elif history_video:
-        video_path = core._resolve_input_path(None, history_video) or ""
-        if video_path and not core._is_supported_media_path(video_path):
+        video_path = _resolve_input_path(None, history_video) or ""
+        if video_path and not _is_supported_media_path(video_path):
             raise HTTPException(status_code=400, detail="当前文件不是受支持的视频或音频格式")
 
     if not video_path:
@@ -4613,7 +4612,7 @@ def api_transcribe_start(
                 device,
             )
         finally:
-            core.set_transcribing_video(None)
+            set_transcribing_video(None)
             if temp_path and temp_path.exists():
                 try:
                     temp_path.unlink()
@@ -4621,7 +4620,7 @@ def api_transcribe_start(
                     pass
             _schedule_next_transcribe()
 
-    core.set_transcribing_video(video_path)
+    set_transcribing_video(video_path)
     _RUNTIME_THREAD = threading.Thread(target=runner, daemon=True)
     _RUNTIME_THREAD.start()
     # 返回相对路径供前端显示
@@ -4690,7 +4689,7 @@ async def api_job_stream(job_id: str):
 @app.post("/api/jobs/{job_id}/stop")
 def api_job_stop(job_id: str):
     _ = _get_job(job_id)
-    core.STOP_EVENT.set()
+    STOP_EVENT.set()
     return {"message": "stop requested"}
 
 
@@ -4732,8 +4731,8 @@ def api_job_download(job_id: str, kind: str):
     if not path or not Path(path).exists():
         if not job.current_job:
             raise HTTPException(status_code=404, detail="bundle not found")
-        job_dir = core.WORKSPACE_DIR / job.current_job
-        file_prefix = core._resolve_file_prefix(job_dir, job.current_prefix)
+        job_dir = WORKSPACE_DIR / job.current_job
+        file_prefix = _resolve_file_prefix(job_dir, job.current_prefix)
         if not file_prefix:
             raise HTTPException(status_code=404, detail="bundle not found")
         try:
@@ -4750,11 +4749,11 @@ def api_job_files(job_id: str):
     if not job.current_job:
         return {"files": []}
 
-    job_dir = core.WORKSPACE_DIR / job.current_job
+    job_dir = WORKSPACE_DIR / job.current_job
     if not job_dir.exists() or not job_dir.is_dir():
         return {"files": []}
 
-    file_prefix = core._resolve_file_prefix(job_dir, job.current_prefix)
+    file_prefix = _resolve_file_prefix(job_dir, job.current_prefix)
     files = [
         p.name
         for p in sorted(job_dir.iterdir(), key=lambda x: x.name.lower())
@@ -4776,7 +4775,7 @@ def api_job_download_file(job_id: str, file_name: str):
     if not clean_name or Path(clean_name).name != clean_name:
         raise HTTPException(status_code=400, detail="invalid file_name")
 
-    job_dir = core.WORKSPACE_DIR / job.current_job
+    job_dir = WORKSPACE_DIR / job.current_job
     target = (job_dir / clean_name).resolve()
     if job_dir.resolve() not in target.parents or not target.exists() or not target.is_file():
         raise HTTPException(status_code=404, detail="file not found")

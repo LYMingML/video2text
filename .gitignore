@@ -29,3 +29,6 @@ certs/
 nohup.out
 logs/*.out
 logs/service.log
+
+# Test artifacts
+download-test/lux.tar.gz
